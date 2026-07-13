@@ -1,0 +1,18 @@
+# macOS 會自動產生的檔案，和專案邏輯無關，不應進入版本控制。
+.DS_Store
+
+# Python bytecode 與測試/工具 cache 都可由直譯器重新產生。
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 本機虛擬環境可由 uv.lock 與 pyproject.toml 重建，提交會造成大量平台相依檔案。
+.venv/
+
+# uv 與 Matplotlib cache 僅用來避免工具寫入使用者家目錄，內容可重建。
+work/
+
+# OCM 前處理與視覺化輸出包含大型 .npy、GIF、PNG 與 JSON 產物。
+# 這些檔案應由 README 的流程重建；只保留手寫/維護的圖像說明文件。
+outputs/*
+!outputs/figures_readme.md
