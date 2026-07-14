@@ -36,9 +36,13 @@ import numpy as np
 # 目標層位落在局部海底以下、來源非結構網格無法支援該點，或插值結果為 NaN。
 # 使用淡灰色而不是預設白色，是為了讓「無資料」與圖面背景清楚分離。
 MISSING_DATA_COLOR = "#d9d9d9"
-# 陸地格點顏色：代表 `mask.npy` 明確標示為非海域的位置。它和 layer 缺值使用
-# 不同色調，讓圖面可同時區分「地理上的陸地」與「該垂向層沒有水體資料」。
-LAND_COLOR = "#f1ead8"
+# 陸地格點顏色：代表 `mask.npy` 明確標示為非海域的位置。舊版淡米色會和
+# `RdBu_r` η/elev 色階的近零或偏正值淡色段混在一起，澎湖等小島格點尤其難辨識。
+# 因此改用中性灰褐色；此色不承載任何海洋物理量，只用來標記「不可當作水體判讀」。
+LAND_COLOR = "#b7b1a6"
+# 陸海邊界線顏色：小島或窄岸線在 10 km 規則格點下可能只佔少數像素，單靠填色仍
+# 容易被箭頭或 η 色階干擾。加上細邊界線可讓 GeoJSON/mesh mask 的陸地輪廓更穩定。
+LAND_EDGE_COLOR = "#555555"
 # 有效海域底色：二維動畫不再以色階呈現速度大小，因此需要固定且低干擾的
 # 海域底色。流速強弱改由箭頭長度表達，避免同時用底圖色彩和向量長度代表同一物理量。
 OCEAN_COLOR = "#e7f2f3"
@@ -50,6 +54,45 @@ QUIVER_COLOR = "#123b5d"
 BACKGROUND_NEUTRAL = "neutral"
 BACKGROUND_ELEV = "elev"
 BACKGROUND_ELEV_ANOMALY = "elev_anomaly"
+
+
+def draw_land_overlay(ax: plt.Axes, lon: np.ndarray, lat: np.ndarray, ocean_mask: np.ndarray) -> None:
+    """在已繪好的 2D 底圖上覆蓋陸地格點與陸海邊界。
+
+    `ocean_mask` 形狀為 `(lat, lon)`，True 代表可判讀海域，False 代表陸地、
+    原始 mesh 外或已由 GeoJSON 陸域遮罩扣除的位置。此函式只負責視覺語意：
+    陸地填色與邊界線不代表水位、流速、缺值或任何海洋變數；它們的目的，是在
+    η/elev 色階或中性海域底色之上保留清楚的地理參照。
+
+    陸地圖層刻意在海域與 η 底圖之後才繪製，並使用較高 `zorder`。這可避免
+    `pcolormesh` 的格點邊界與 GIF 量化讓澎湖、綠島、蘭嶼等小陸塊被淡色 η
+    背景吃掉；邊界線只在同一張水平網格中同時存在海域與非海域時才畫，避免
+    全海域或全遮罩測試資料觸發 matplotlib 的空 contour 警告。
+    """
+
+    # 若目前 bbox 完全沒有非海域格點，直接返回；這保留全海域測試資料的乾淨輸出，
+    # 也避免對全遮罩的 masked array 繪製空 pcolormesh。
+    if not np.any(~ocean_mask):
+        return
+
+    # 陸地遮罩使用 masked array：海域格點被遮掉，只有 ocean_mask=False 的位置會
+    # 覆蓋 LAND_COLOR。資料值本身固定為 1，因為這不是連續物理量，只是分類標記。
+    land = np.ma.masked_where(ocean_mask, np.ones_like(ocean_mask, dtype=np.float32))
+    land_cmap = matplotlib.colors.ListedColormap([LAND_COLOR])
+    ax.pcolormesh(lon, lat, land, shading="auto", cmap=land_cmap, vmin=0, vmax=1, zorder=3)
+
+    # 只有同時存在海域與非海域時才有可定義的陸海分界。contour level 0.5 表示
+    # bool mask 從 0(False) 到 1(True) 的交界，而不是新的資料閾值。
+    if np.any(ocean_mask) and np.any(~ocean_mask):
+        ax.contour(
+            lon,
+            lat,
+            ocean_mask.astype(np.float32),
+            levels=[0.5],
+            colors=LAND_EDGE_COLOR,
+            linewidths=0.45,
+            zorder=4,
+        )
 
 
 def load_month(input_dir: Path) -> dict[str, np.ndarray | dict]:
@@ -327,12 +370,6 @@ def frame_to_png(
         # 在陸地格點保留數值而被底圖上色。
         background = apply_ocean_mask(background, ocean_mask)
 
-    # 在最底層先畫陸地底色。MISSING_DATA_COLOR 保留給海域內 layer 缺值，
-    # LAND_COLOR 則只對應水平 mask=False，讓海洋/陸地/缺值三者可被目視區分。
-    land = np.ma.masked_where(ocean_mask, np.zeros_like(ocean_mask, dtype=np.float32))
-    land_cmap = matplotlib.colors.ListedColormap([LAND_COLOR])
-    ax.pcolormesh(lon, lat, land, shading="auto", cmap=land_cmap, vmin=0, vmax=1)
-
     # 軸背景設成缺值色，讓完全沒有有效 layer 資料的位置維持淡灰色。
     # 後續的固定海域底圖只畫在 speed 有限的位置，因此不會把缺值區染成海域。
     ax.set_facecolor(MISSING_DATA_COLOR)
@@ -351,6 +388,10 @@ def frame_to_png(
         mesh = ax.pcolormesh(lon, lat, background_layer, shading="auto", cmap="RdBu_r", norm=background_norm)
         cbar = fig.colorbar(mesh, ax=ax, shrink=0.84, pad=0.025)
         configure_eta_colorbar(cbar, background_norm, background_label or "η / elev (m)")
+
+    # 陸地最後覆蓋在海域或 η 底圖之上。這讓 `mask.npy`/GeoJSON 判定出的陸地
+    # 不會和 η 色階的近零淡色混淆，也保留澎湖等小島在粗解析度圖面中的輪廓。
+    draw_land_overlay(ax, lon, lat, ocean_mask)
 
     # 計算箭頭採樣位置：傳入的 quiver_step 為 (y_step, x_step)
     sy, sx = quiver_step

@@ -221,6 +221,130 @@ def points_in_ring(points: np.ndarray, ring: np.ndarray) -> np.ndarray:
     return inside | on_boundary
 
 
+def axis_cell_bounds(axis: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """由規則格點中心座標推估每個 cell 的左右/上下邊界。
+
+    `axis` 是 `build_target_grid()` 產生的一維經度或緯度中心座標。輸出兩個同長度
+    陣列，分別代表每個格點 cell 在該軸向的下界與上界。這裡不改變輸出格點數，
+    只在 GeoJSON rasterize 階段用 cell 範圍判斷小島是否與格點相交；因此不會
+    增加 `u/v/speed/elev/zcor` 等月資料陣列大小。
+
+    邊界以相鄰中心點的中點決定；最外側 cell 則沿用相鄰間距外推半格。此假設
+    對目前 `np.linspace()` 建立的規則經緯度網格成立，若未來改成不規則格網，
+    需同步檢查此函式與 GeoJSON 遮罩語意。
+    """
+
+    axis = np.asarray(axis, dtype=np.float64)
+    if axis.ndim != 1 or axis.size < 2:
+        raise ValueError("GeoJSON cell-overlap land mask requires a one-dimensional axis with at least two cells.")
+
+    edges = np.empty(axis.size + 1, dtype=np.float64)
+    edges[1:-1] = 0.5 * (axis[:-1] + axis[1:])
+    edges[0] = axis[0] - 0.5 * (axis[1] - axis[0])
+    edges[-1] = axis[-1] + 0.5 * (axis[-1] - axis[-2])
+    return edges[:-1], edges[1:]
+
+
+def build_cell_bounds(target_points: np.ndarray, grid_shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """建立每個目標格點 cell 的經緯度邊界。
+
+    `target_points` 由 `(lat, lon)` 規則網格攤平成 `(n, 2)`，第一欄是經度、第二欄
+    是緯度。回傳的四個一維陣列都和 `target_points` 攤平順序一致，分別代表
+    `lon_min/lon_max/lat_min/lat_max`。這些邊界只用於判斷 GeoJSON polygon 是否
+    觸及格點 cell，不會改變實際輸出的格點中心座標或資料解析度。
+    """
+
+    lat_count, lon_count = grid_shape
+    if target_points.shape != (lat_count * lon_count, 2):
+        raise ValueError(f"target_points shape {target_points.shape} does not match grid_shape {grid_shape}")
+
+    grid = np.asarray(target_points, dtype=np.float64).reshape(lat_count, lon_count, 2)
+    lon_axis = grid[0, :, 0]
+    lat_axis = grid[:, 0, 1]
+
+    # 防禦性確認輸入仍是規則格網。若這裡 silent 接受不規則座標，cell 邊界會錯誤，
+    # 小島遮罩也可能被錯誤擴張到不相鄰的格點。
+    if not np.allclose(grid[:, :, 0], lon_axis[None, :]) or not np.allclose(grid[:, :, 1], lat_axis[:, None]):
+        raise ValueError("GeoJSON land mask cell bounds require target_points to be a regular lon/lat grid.")
+
+    lon_lower, lon_upper = axis_cell_bounds(lon_axis)
+    lat_lower, lat_upper = axis_cell_bounds(lat_axis)
+    cell_lon_min, cell_lat_min = np.meshgrid(lon_lower, lat_lower)
+    cell_lon_max, cell_lat_max = np.meshgrid(lon_upper, lat_upper)
+    return cell_lon_min.ravel(), cell_lon_max.ravel(), cell_lat_min.ravel(), cell_lat_max.ravel()
+
+
+def ring_touches_grid_cells(
+    ring: np.ndarray,
+    candidate_indices: np.ndarray,
+    target_points: np.ndarray,
+    cell_lon_min: np.ndarray,
+    cell_lon_max: np.ndarray,
+    cell_lat_min: np.ndarray,
+    cell_lat_max: np.ndarray,
+) -> np.ndarray:
+    """判斷 GeoJSON ring 是否觸及候選目標格點 cell。
+
+    舊版只檢查格點中心是否在 polygon 內；10 km 格點下，澎湖、蘭嶼這類小島可能
+    剛好落在中心點之間而被當成海域。此函式改用不增加輸出資料量的 cell 判斷：
+    同一個 cell 的中心點、四個角點，或 GeoJSON ring 任一頂點只要落入對方範圍，
+    就視為該 cell 與 ring 接觸。
+
+    這是輕量近似的 rasterize，不引入 shapely/geopandas 等額外相依，也不改變
+    時間步或垂向層數。限制是：若一條很長且沒有中間頂點的 polygon 邊穿過 cell，
+    但 cell 角點與 polygon 頂點都沒有互相落入，理論上仍可能漏判；台灣縣市
+    GeoJSON 海岸線頂點密集，對本專案離島修正已足夠。
+    """
+
+    if candidate_indices.size == 0:
+        return np.zeros(0, dtype=bool)
+
+    candidate_centers = target_points[candidate_indices]
+    lon_min = cell_lon_min[candidate_indices]
+    lon_max = cell_lon_max[candidate_indices]
+    lat_min = cell_lat_min[candidate_indices]
+    lat_max = cell_lat_max[candidate_indices]
+
+    # 以中心點與四個角點檢查 cell 是否進入 polygon。角點補上「島嶼落在中心點之間」
+    # 的情況；中心點則保留舊版在大面積陸域內的直觀語意。
+    sample_sets = (
+        candidate_centers,
+        np.column_stack([lon_min, lat_min]),
+        np.column_stack([lon_min, lat_max]),
+        np.column_stack([lon_max, lat_min]),
+        np.column_stack([lon_max, lat_max]),
+    )
+    touched = np.zeros(candidate_indices.size, dtype=bool)
+    for sample_points in sample_sets:
+        touched |= points_in_ring(sample_points, ring)
+
+    # 若小島完全落在某個 10 km cell 內，但中心與角點都不在島內，仍應視為此 cell
+    # 和陸地相交。檢查 ring 頂點是否落入 cell bbox 可補上這類小 polygon。
+    ring_lon = ring[:, 0]
+    ring_lat = ring[:, 1]
+    ring_candidate_mask = (
+        (ring_lon >= float(np.min(lon_min)))
+        & (ring_lon <= float(np.max(lon_max)))
+        & (ring_lat >= float(np.min(lat_min)))
+        & (ring_lat <= float(np.max(lat_max)))
+    )
+    nearby_ring = ring[ring_candidate_mask]
+    if nearby_ring.size:
+        vertex_lon = nearby_ring[:, 0]
+        vertex_lat = nearby_ring[:, 1]
+        for local_index in np.flatnonzero(~touched):
+            touched[local_index] = bool(
+                np.any(
+                    (vertex_lon >= lon_min[local_index])
+                    & (vertex_lon <= lon_max[local_index])
+                    & (vertex_lat >= lat_min[local_index])
+                    & (vertex_lat <= lat_max[local_index])
+                )
+            )
+
+    return touched
+
+
 def build_geojson_land_mask(
     geojson_path: Path,
     target_points: np.ndarray,
@@ -230,20 +354,22 @@ def build_geojson_land_mask(
 
     geojson_path 指向本機 GeoJSON 檔，資料來源可為 g0v/twgeojson、OXXO 文章
     指向的 Sheethub 下載檔，或其它正式岸線/行政區 polygon。回傳的 land_mask
-    形狀為 `(lat, lon)`，True 代表目標格點落在 GeoJSON 陸域 polygon 內，應從
-    OCM 有效海域遮罩扣除。summary 用於寫入 metadata，保留圖資路徑、命中格點
-    與略過 polygon 數量，方便日後追溯遮罩來源與遮蔽程度。
+    形狀為 `(lat, lon)`，True 代表目標格點 cell 接觸 GeoJSON 陸域 polygon，
+    應從 OCM 有效海域遮罩扣除。summary 用於寫入 metadata，保留圖資路徑、
+    命中格點與略過 polygon 數量，方便日後追溯遮罩來源與遮蔽程度。
+
+    rasterize 採用 cell-overlap 近似，而不是只用格點中心點；這可在不降低目標
+    解析度、不增加月資料檔案大小的前提下，讓澎湖、蘭嶼等小島仍能命中至少一個
+    規則格點。輸出 `mask.npy` 仍維持原本 `(lat, lon)` 尺寸。
     """
 
     # 明確以 UTF-8 讀取 GeoJSON，避免中文縣市名稱或屬性在 metadata 來源檢查時出錯。
     geojson = json.loads(geojson_path.read_text(encoding="utf-8"))
     flat_land_mask = np.zeros(target_points.shape[0], dtype=bool)
+    cell_lon_min, cell_lon_max, cell_lat_min, cell_lat_max = build_cell_bounds(target_points, grid_shape)
     polygon_count = 0
     skipped_polygon_count = 0
-    candidate_point_tests = 0
-
-    target_lon = target_points[:, 0]
-    target_lat = target_points[:, 1]
+    candidate_cell_tests = 0
     for rings in iter_geojson_polygon_rings(geojson):
         if not rings:
             skipped_polygon_count += 1
@@ -251,23 +377,32 @@ def build_geojson_land_mask(
         polygon_count += 1
         exterior = rings[0]
 
-        # 先用 exterior bbox 篩出可能命中的格點，避免每個縣市 polygon 都掃描整個網格。
+        # 先用 exterior bbox 篩出可能命中的格點。因為現在判斷的是 cell 是否碰到
+        # polygon，而不是中心點是否落在 polygon 內，所以使用 cell bbox 和 polygon bbox
+        # 是否重疊來選候選格點，避免澎湖、蘭嶼這類小島剛好落在中心點之間時被漏掉。
         lon_min = float(np.nanmin(exterior[:, 0]))
         lon_max = float(np.nanmax(exterior[:, 0]))
         lat_min = float(np.nanmin(exterior[:, 1]))
         lat_max = float(np.nanmax(exterior[:, 1]))
         candidate_indices = np.flatnonzero(
-            (target_lon >= lon_min)
-            & (target_lon <= lon_max)
-            & (target_lat >= lat_min)
-            & (target_lat <= lat_max)
+            (cell_lon_max >= lon_min)
+            & (cell_lon_min <= lon_max)
+            & (cell_lat_max >= lat_min)
+            & (cell_lat_min <= lat_max)
         )
         if candidate_indices.size == 0:
             continue
 
-        candidate_point_tests += int(candidate_indices.size)
-        candidate_points = target_points[candidate_indices]
-        polygon_land = points_in_ring(candidate_points, exterior)
+        candidate_cell_tests += int(candidate_indices.size)
+        polygon_land = ring_touches_grid_cells(
+            exterior,
+            candidate_indices,
+            target_points,
+            cell_lon_min,
+            cell_lon_max,
+            cell_lat_min,
+            cell_lat_max,
+        )
         if not polygon_land.any():
             continue
 
@@ -277,16 +412,29 @@ def build_geojson_land_mask(
             if not polygon_land.any():
                 break
             hole_candidates = np.flatnonzero(polygon_land)
-            polygon_land[hole_candidates] &= ~points_in_ring(candidate_points[hole_candidates], hole)
+            polygon_land[hole_candidates] &= ~ring_touches_grid_cells(
+                hole,
+                candidate_indices[hole_candidates],
+                target_points,
+                cell_lon_min,
+                cell_lon_max,
+                cell_lat_min,
+                cell_lat_max,
+            )
 
         flat_land_mask[candidate_indices] |= polygon_land
 
     summary = {
         "path": str(geojson_path),
         "format": "GeoJSON Polygon/MultiPolygon",
+        "rasterize_mode": "cell_overlap_center_corners_vertices",
+        "rasterize_semantics": (
+            "A grid cell is land when its center, any corner, or any GeoJSON ring vertex touches a land polygon; "
+            "this preserves small islands without changing output grid resolution."
+        ),
         "polygon_count": int(polygon_count),
         "skipped_polygon_count": int(skipped_polygon_count),
-        "candidate_point_tests": int(candidate_point_tests),
+        "candidate_cell_tests": int(candidate_cell_tests),
         "land_grid_cell_count": int(flat_land_mask.sum()),
     }
     return flat_land_mask.reshape(grid_shape), summary

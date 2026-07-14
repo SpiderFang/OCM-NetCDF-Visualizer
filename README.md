@@ -113,8 +113,10 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
 - `mask.npy`：有效海域遮罩。新版前處理會優先依原始 `SCHISM_hgrid_face_nodes`
   水平元素判斷靜態海域，避免 Delaunay 凸包把陸地洞補成流場；若原始資料提供
   `wetdry_elem`，逐時乾出元素會在輸出的 `u/v/speed/zcor` 中直接寫成 NaN。若提供
-  `--land-geojson`，落在 GeoJSON 陸域 polygon 內的格點也會從 `mask.npy` 扣除，
-  並在 `bathymetry/u/v/speed/elev/zcor` 等已輸出的欄位寫成 NaN。
+  `--land-geojson`，與 GeoJSON 陸域 polygon 接觸的目標格點 cell 也會從 `mask.npy`
+  扣除，並在 `bathymetry/u/v/speed/elev/zcor` 等已輸出的欄位寫成 NaN。這個
+  cell-overlap 判斷不改變格點數或輸出陣列大小，但能避免澎湖、蘭嶼等小島因
+  10 km 格點中心沒有落在 polygon 內而被誤保留為海域。
 - `monthly_summary.json`：流速統計、時間範圍、輸入檔案與參數。
 
 ## 3. 產生 2D 動畫
@@ -233,6 +235,7 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
   百分位裁切。若資料範圍跨過 0，colorbar 會同時標示 0。
 - 深藍色箭頭代表有效格點的水平流向與流速大小；方向表示流向，長度表示流速相對強弱。若 `speed/u/v` 任一分量缺值，該格點不畫箭頭。
 - 淡灰色區域代表該 layer 在該水平位置沒有有效資料，常見原因是該模型層位於局部海底以下或插值後為 NaN；淡灰色不是低流速，也不應解讀為靜水。
+- 灰褐色格點與細灰色邊界線代表 `mask.npy=False` 的非海域位置，可能來自原始 mesh 外、GeoJSON 陸域遮罩或其它無效格點。這些陸地標記會覆蓋在 `η/elev` 底圖之上，目的是避免澎湖、綠島、蘭嶼等小島被 `RdBu_r` 色階的近零淡色吃掉；灰褐色本身不代表水位、流速或缺值大小。
 
 重要參數意義：
 
@@ -351,7 +354,10 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
   `u/v/speed/zcor` 的 NaN 與 `monthly_summary.json` 的 `wetdry_elem` 區段。
 - `--land-geojson` 是靜態陸域遮罩，適合修正本島、離島與行政區 polygon 內的
   假水體格點；它不是逐時潮汐乾濕遮罩，也不會取代 `wetdry_elem`。遮罩演算法
-  假設 GeoJSON 使用 WGS84 `[lon, lat]` 座標，且 polygon 不跨日期變更線。
+  假設 GeoJSON 使用 WGS84 `[lon, lat]` 座標，且 polygon 不跨日期變更線。為了
+  在不降低解析度、不增加月資料檔案大小的情況下保留小島，GeoJSON rasterize
+  會檢查格點 cell 的中心、四角與 GeoJSON ring 頂點是否互相接觸，而不是只檢查
+  中心點是否落在 polygon 內。
 - 垂向維度先沿用原檔層索引或 sigma 代表值，尚未重採樣到固定水深層。
 - 三維示意圖使用靜態稀疏箭頭，適合先期判讀；若要高品質互動流線，建議後續輸出 VTK/XDMF 給 ParaView 或 pyParaOcean。
 - 大範圍、高解析度、全時間步、全垂向層會產生大量中間檔，整年處理時應以月份為單位分批執行。
