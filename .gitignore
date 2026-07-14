@@ -16,3 +16,7 @@ work/
 # 這些檔案應由 README 的流程重建；只保留手寫/維護的圖像說明文件。
 outputs/*
 !outputs/figures_readme.md
+
+# 外部 GeoJSON/TopoJSON 岸線或行政區圖資由 README 的下載指令重建。
+# 這些檔案可能很大，且版本應由執行紀錄與 monthly_summary.json 追蹤，不直接提交。
+data/geojson/

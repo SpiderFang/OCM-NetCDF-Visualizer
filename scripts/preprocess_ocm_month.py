@@ -34,7 +34,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 from netCDF4 import Dataset, num2date
@@ -106,6 +106,188 @@ class MeshWeights:
     weights: np.ndarray
     element_indices: np.ndarray
     valid: np.ndarray
+
+
+def _ring_to_lonlat_array(raw_ring: Any) -> np.ndarray | None:
+    """將 GeoJSON ring 座標轉成 `(n, 2)` 經緯度陣列。
+
+    GeoJSON 的 polygon ring 以 `[lon, lat]` 或 `[lon, lat, z]` 座標序列表示；
+    本專案只需要水平遮罩，因此只保留前兩欄。若 ring 點數不足、座標維度不符
+    或含有非有限值，回傳 None 代表該 ring 不適合作為陸域遮罩。這種保守處理
+    可避免外部圖資局部壞點讓整個月前處理中斷。
+    """
+
+    # 外部 GeoJSON 可能含有第三維高程或其它屬性；只取 lon/lat 兩欄做水平判斷。
+    ring = np.asarray(raw_ring, dtype=np.float64)
+    if ring.ndim != 2 or ring.shape[0] < 4 or ring.shape[1] < 2:
+        return None
+    lonlat = ring[:, :2]
+    if not np.isfinite(lonlat).all():
+        return None
+    return lonlat
+
+
+def iter_geojson_polygon_rings(geometry: dict[str, Any] | None) -> Iterable[list[np.ndarray]]:
+    """逐一產生 GeoJSON polygon 的 ring 陣列。
+
+    輸入可為 Geometry、Feature、FeatureCollection 或 GeometryCollection。輸出
+    每個 polygon 的 rings，第一個 ring 是外環，後續 ring 是洞環；呼叫端會用
+    外環加入陸域、洞環扣回非陸域。只處理 Polygon/MultiPolygon，LineString、
+    Point 等幾何無法定義面積，因此會被略過。
+    """
+
+    if not geometry:
+        return
+
+    geometry_type = geometry.get("type")
+    if geometry_type == "FeatureCollection":
+        # FeatureCollection 是 g0v/twgeojson 與多數行政區 GeoJSON 的常見格式。
+        # 逐一遞迴 feature，可支援不同縣市分別作為獨立 feature 的資料結構。
+        for feature in geometry.get("features", []):
+            yield from iter_geojson_polygon_rings(feature)
+        return
+    if geometry_type == "Feature":
+        # Feature 的 properties 僅用於屬性描述；遮罩只需 geometry。
+        yield from iter_geojson_polygon_rings(geometry.get("geometry"))
+        return
+    if geometry_type == "GeometryCollection":
+        # 少數資料會把多種 geometry 放在 collection；只抽取其中面狀幾何。
+        for child in geometry.get("geometries", []):
+            yield from iter_geojson_polygon_rings(child)
+        return
+    if geometry_type == "Polygon":
+        rings = [_ring_to_lonlat_array(ring) for ring in geometry.get("coordinates", [])]
+        valid_rings = [ring for ring in rings if ring is not None]
+        if valid_rings:
+            yield valid_rings
+        return
+    if geometry_type == "MultiPolygon":
+        for polygon in geometry.get("coordinates", []):
+            rings = [_ring_to_lonlat_array(ring) for ring in polygon]
+            valid_rings = [ring for ring in rings if ring is not None]
+            if valid_rings:
+                yield valid_rings
+
+
+def points_in_ring(points: np.ndarray, ring: np.ndarray) -> np.ndarray:
+    """判斷多個 `(lon, lat)` 點是否位於單一 polygon ring 內。
+
+    使用向量化 ray-casting 演算法：從每個目標點向右發射水平射線，射線穿過 ring
+    邊界的次數為奇數即視為在內。回傳值包含落在邊界上的點；對陸地遮罩而言，
+    邊界點保守視為陸地，可避免海岸線剛好穿過格點時仍留下假流速。座標假設為
+    WGS84 經緯度，適用於台灣區域這種小範圍遮罩；不處理跨日期變更線的 polygon。
+    """
+
+    x = points[:, 0]
+    y = points[:, 1]
+    ring_x = ring[:, 0]
+    ring_y = ring[:, 1]
+    inside = np.zeros(points.shape[0], dtype=bool)
+    on_boundary = np.zeros(points.shape[0], dtype=bool)
+
+    # 逐段檢查 polygon 邊。迴圈跑在邊數上，點集合運算仍由 NumPy 向量化處理；
+    # 對本專案規則格點數量來說，比引入額外 GIS 原生相依更容易部署與維護。
+    previous = ring.shape[0] - 1
+    for current in range(ring.shape[0]):
+        x0 = ring_x[previous]
+        y0 = ring_y[previous]
+        x1 = ring_x[current]
+        y1 = ring_y[current]
+
+        # 邊界判斷：若點到線段的外積接近 0，且投影落在線段 bbox 內，就視為在邊界。
+        # tolerance 使用經緯度的極小值，只處理浮點誤差，不主動擴張岸線。
+        tolerance = 1.0e-10
+        segment_dx = x1 - x0
+        segment_dy = y1 - y0
+        cross = (x - x0) * segment_dy - (y - y0) * segment_dx
+        within_segment_bbox = (
+            (x >= min(x0, x1) - tolerance)
+            & (x <= max(x0, x1) + tolerance)
+            & (y >= min(y0, y1) - tolerance)
+            & (y <= max(y0, y1) + tolerance)
+        )
+        on_boundary |= (np.abs(cross) <= tolerance) & within_segment_bbox
+
+        # Ray casting 主體：水平邊不會穿越射線，會被第一個條件排除；np.errstate
+        # 避免水平邊造成除以 0 警告，但不改變邏輯結果。
+        crosses_latitude = (y0 > y) != (y1 > y)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            crossing_lon = (segment_dx * (y - y0) / (y1 - y0)) + x0
+        inside ^= crosses_latitude & (x < crossing_lon)
+        previous = current
+
+    return inside | on_boundary
+
+
+def build_geojson_land_mask(
+    geojson_path: Path,
+    target_points: np.ndarray,
+    grid_shape: tuple[int, int],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """從 GeoJSON 面狀圖資建立規則格點陸地遮罩。
+
+    geojson_path 指向本機 GeoJSON 檔，資料來源可為 g0v/twgeojson、OXXO 文章
+    指向的 Sheethub 下載檔，或其它正式岸線/行政區 polygon。回傳的 land_mask
+    形狀為 `(lat, lon)`，True 代表目標格點落在 GeoJSON 陸域 polygon 內，應從
+    OCM 有效海域遮罩扣除。summary 用於寫入 metadata，保留圖資路徑、命中格點
+    與略過 polygon 數量，方便日後追溯遮罩來源與遮蔽程度。
+    """
+
+    # 明確以 UTF-8 讀取 GeoJSON，避免中文縣市名稱或屬性在 metadata 來源檢查時出錯。
+    geojson = json.loads(geojson_path.read_text(encoding="utf-8"))
+    flat_land_mask = np.zeros(target_points.shape[0], dtype=bool)
+    polygon_count = 0
+    skipped_polygon_count = 0
+    candidate_point_tests = 0
+
+    target_lon = target_points[:, 0]
+    target_lat = target_points[:, 1]
+    for rings in iter_geojson_polygon_rings(geojson):
+        if not rings:
+            skipped_polygon_count += 1
+            continue
+        polygon_count += 1
+        exterior = rings[0]
+
+        # 先用 exterior bbox 篩出可能命中的格點，避免每個縣市 polygon 都掃描整個網格。
+        lon_min = float(np.nanmin(exterior[:, 0]))
+        lon_max = float(np.nanmax(exterior[:, 0]))
+        lat_min = float(np.nanmin(exterior[:, 1]))
+        lat_max = float(np.nanmax(exterior[:, 1]))
+        candidate_indices = np.flatnonzero(
+            (target_lon >= lon_min)
+            & (target_lon <= lon_max)
+            & (target_lat >= lat_min)
+            & (target_lat <= lat_max)
+        )
+        if candidate_indices.size == 0:
+            continue
+
+        candidate_point_tests += int(candidate_indices.size)
+        candidate_points = target_points[candidate_indices]
+        polygon_land = points_in_ring(candidate_points, exterior)
+        if not polygon_land.any():
+            continue
+
+        # GeoJSON Polygon 後續 ring 是洞環。洞環內的點不應視為陸地；這對湖泊、
+        # 特殊行政區界線或未來更細的岸線資料很重要。
+        for hole in rings[1:]:
+            if not polygon_land.any():
+                break
+            hole_candidates = np.flatnonzero(polygon_land)
+            polygon_land[hole_candidates] &= ~points_in_ring(candidate_points[hole_candidates], hole)
+
+        flat_land_mask[candidate_indices] |= polygon_land
+
+    summary = {
+        "path": str(geojson_path),
+        "format": "GeoJSON Polygon/MultiPolygon",
+        "polygon_count": int(polygon_count),
+        "skipped_polygon_count": int(skipped_polygon_count),
+        "candidate_point_tests": int(candidate_point_tests),
+        "land_grid_cell_count": int(flat_land_mask.sum()),
+    }
+    return flat_land_mask.reshape(grid_shape), summary
 
 
 def list_month_files(input_dir: Path, max_files: int | None) -> list[Path]:
@@ -355,6 +537,40 @@ def _assign_triangle_weights(
     valid[matched] = True
 
 
+def grid_bbox_candidate_indices(
+    lon_axis: np.ndarray,
+    lat_axis: np.ndarray,
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    valid: np.ndarray,
+) -> np.ndarray:
+    """用規則格點座標軸快速找出落在 bbox 內的目標格點索引。
+
+    原先做法會對每一個 SCHISM face 掃描整個目標格點陣列；在 10 km 網格尚可，
+    但 1 km 台灣 bbox 會放大到約 32 萬格點，導致 face 數量乘上格點數的成本
+    過高。這裡利用 lon/lat 規則遞增的一維軸，以 `searchsorted` 直接切出 face
+    bbox 涵蓋的 x/y 範圍，再轉回 target_points 的 row-major 扁平索引。輸出只
+    包含尚未被其它元素命中的格點，維持原本「第一個命中元素」的邊界處理語意。
+    """
+
+    lon_start = int(np.searchsorted(lon_axis, lon_min, side="left"))
+    lon_stop = int(np.searchsorted(lon_axis, lon_max, side="right"))
+    lat_start = int(np.searchsorted(lat_axis, lat_min, side="left"))
+    lat_stop = int(np.searchsorted(lat_axis, lat_max, side="right"))
+
+    # 若 face bbox 完全不與目標規則格點交會，直接回傳空陣列，避免後續建立 meshgrid。
+    if lon_start >= lon_stop or lat_start >= lat_stop:
+        return np.empty(0, dtype=np.int64)
+
+    lon_count = lon_axis.size
+    x_indices = np.arange(lon_start, lon_stop, dtype=np.int64)
+    y_indices = np.arange(lat_start, lat_stop, dtype=np.int64)
+    candidate_indices = (y_indices[:, None] * lon_count + x_indices[None, :]).ravel()
+    return candidate_indices[~valid[candidate_indices]]
+
+
 def build_mesh_interpolation_weights(path: Path, target_points: np.ndarray, grid_shape: tuple[int, int]) -> MeshWeights:
     """用原始 SCHISM 水平元素建立規則格點插值權重。
 
@@ -373,9 +589,12 @@ def build_mesh_interpolation_weights(path: Path, target_points: np.ndarray, grid
         lat = np.asarray(ds.variables["SCHISM_hgrid_node_y"][:], dtype=np.float64)
         faces = _normalize_face_nodes(ds.variables["SCHISM_hgrid_face_nodes"][:], lon.size)
 
-    target_lon = target_points[:, 0]
-    target_lat = target_points[:, 1]
     lat_count, lon_count = grid_shape
+    # target_points 由 build_target_grid 的 np.meshgrid(lon, lat) 依 row-major 攤平成
+    # `(lon, lat)` 點列；因此前 lon_count 個點就是經度軸，每隔 lon_count 個點就是
+    # 緯度軸。後續 face bbox 搜尋使用這兩條軸，避免每個 face 全域掃描所有格點。
+    lon_axis = target_points[:lon_count, 0]
+    lat_axis = target_points[::lon_count, 1]
     vertices = np.full((target_points.shape[0], 4), -1, dtype=np.int64)
     weights = np.full((target_points.shape[0], 4), np.nan, dtype=np.float64)
     element_indices = np.full(target_points.shape[0], -1, dtype=np.int64)
@@ -391,12 +610,14 @@ def build_mesh_interpolation_weights(path: Path, target_points: np.ndarray, grid
         lon_max = float(np.nanmax(polygon[:, 0]))
         lat_min = float(np.nanmin(polygon[:, 1]))
         lat_max = float(np.nanmax(polygon[:, 1]))
-        candidate_indices = np.flatnonzero(
-            (~valid)
-            & (target_lon >= lon_min)
-            & (target_lon <= lon_max)
-            & (target_lat >= lat_min)
-            & (target_lat <= lat_max)
+        candidate_indices = grid_bbox_candidate_indices(
+            lon_axis,
+            lat_axis,
+            lon_min,
+            lon_max,
+            lat_min,
+            lat_max,
+            valid,
         )
         if candidate_indices.size == 0:
             continue
@@ -588,6 +809,7 @@ def process_month(
     month: int,
     time_stride: int,
     include_zcor_time: bool,
+    land_geojson: Path | None,
 ) -> None:
     """處理完整月資料並寫出中間檔。
 
@@ -595,6 +817,9 @@ def process_month(
     讀取，也讓後續研究區域分割能直接在 layer/lat/lon 軸上計算統計特徵。
     include_zcor_time 控制是否額外保存完整逐時 `zcor.npy`；此檔可呈現水位
     與 sigma/z 層位逐時變動，但大小約與單一流速分量相同，因此預設不輸出。
+    land_geojson 是選用的外部陸域面狀圖資；若提供，會在原始 mesh/wetdry 遮罩
+    之外再扣除落在 GeoJSON polygon 內的格點，修正原始 mesh 在陸地內殘留的
+    假有效格點。
     """
 
     # 建立輸出資料夾與目標格點
@@ -637,6 +862,26 @@ def process_month(
     else:
         bathymetry = apply_interpolation(depth_values[node_window.indices], interpolation_weights, grid_shape)
         mask = np.isfinite(bathymetry)
+
+    # 選用外部 GeoJSON 陸域遮罩。這一步在時間迴圈前完成，因為行政區/岸線 polygon
+    # 是靜態地理遮罩，不隨時間改變；先更新 mask 可讓後續 hvel/zcor/wetdry 全部沿用
+    # 同一套海域定義，避免同一格點在不同輸出檔有不一致的海陸語意。
+    land_geojson_summary: dict[str, Any] | None = None
+    if land_geojson is not None:
+        land_mask, land_geojson_summary = build_geojson_land_mask(land_geojson, target_points, grid_shape)
+        ocean_cells_before_land_mask = int(mask.sum())
+        mask = mask & ~land_mask
+        # bathymetry 在陸地遮罩內改為 NaN，讓下游若直接讀 bathymetry 也不會把
+        # GeoJSON 已判定為陸地的位置誤解為可用水深。
+        bathymetry = np.asarray(bathymetry, dtype=np.float32).copy()
+        bathymetry[land_mask] = np.nan
+        land_geojson_summary.update(
+            {
+                "ocean_grid_cell_count_before": ocean_cells_before_land_mask,
+                "ocean_grid_cell_count_after": int(mask.sum()),
+                "masked_ocean_grid_cell_count": ocean_cells_before_land_mask - int(mask.sum()),
+            }
+        )
     # 準備暫存容器：時間列表、每個時間的 u/v frames、選擇性的逐時 zcor，以及 zcor 的累加器
     times: list[str] = []
     u_frames: list[np.ndarray] = []
@@ -789,6 +1034,18 @@ def process_month(
             else None,
         },
     }
+    if land_geojson_summary is not None:
+        # 只有使用者明確傳入 --land-geojson 時才把外部遮罩資訊寫入 metadata。
+        # 未啟用時維持舊版 monthly_summary 結構，避免原有批次流程或下游檢查腳本
+        # 因多出的欄位與 note 產生不必要差異。
+        summary["land_geojson"] = {
+            "applied": True,
+            "source": land_geojson_summary,
+            "semantics": "GeoJSON Polygon/MultiPolygon cells are removed from mask.npy and written as NaN in bathymetry/u/v/speed/zcor.",
+        }
+        summary["notes"].append(
+            "Optional --land-geojson subtracts static land polygons from mask.npy before all time-varying arrays are written."
+        )
     (output_dir / "monthly_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -819,6 +1076,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Save full time-varying zcor.npy for 3D animations that need water-level/layer motion.",
     )
+    parser.add_argument(
+        "--land-geojson",
+        type=Path,
+        help=(
+            "Optional local GeoJSON Polygon/MultiPolygon file used as a static land mask. "
+            "Cells inside land polygons are removed from mask.npy and written as NaN in outputs."
+        ),
+    )
     parser.add_argument("--max-files", type=int, help="Optional cap for quick tests.")
     return parser.parse_args()
 
@@ -838,6 +1103,11 @@ def main() -> None:
         source_margin_deg=args.source_margin_deg,
     )
     files = list_month_files(args.input_dir, args.max_files)
+    # 外部陸域遮罩必須是本機可讀檔案；前處理不在執行中下載遠端 URL，因為批次
+    # 月資料處理需要可重現的圖資版本與穩定 I/O，避免網路狀態改變輸出結果。
+    land_geojson = args.land_geojson
+    if land_geojson is not None and not land_geojson.exists():
+        raise FileNotFoundError(f"--land-geojson file not found: {land_geojson}")
     process_month(
         files,
         args.output_dir,
@@ -846,6 +1116,7 @@ def main() -> None:
         args.month,
         args.time_stride,
         args.include_zcor_time,
+        land_geojson,
     )
 
 

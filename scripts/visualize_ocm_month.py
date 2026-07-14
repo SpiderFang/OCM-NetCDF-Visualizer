@@ -716,7 +716,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--frame-stride", type=int, default=1, help="Use every Nth preprocessed frame in GIF.")
     parser.add_argument("--fps", type=int, default=6, help="GIF frames per second.")
-    parser.add_argument("--target-arrows", type=int, default=500, help="Approximate number of quiver arrows per frame.")
+    parser.add_argument("--target-arrows", type=int, default=1000, help="Approximate number of quiver arrows per frame.")
     parser.add_argument("--make-3d", action="store_true", help="Create static 3D current-field sketch.")
     parser.add_argument(
         "--make-3d-animation",

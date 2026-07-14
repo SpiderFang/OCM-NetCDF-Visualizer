@@ -13,6 +13,25 @@
 
 - `docs/NEXT_PHASE_ENHANCED_SPEC.md`：記錄下一階段加強版實作規格，包含 `dahv` 深度平均流場、`elev` 水位疊圖、`vertical_velocity` 垂直流速、溫鹽密度特徵、乾濕遮罩、年度批次處理與驗收標準。後續開發新欄位或新動畫前，應先依此 spec 拆分任務與更新 README。
 
+## 選用外部 GeoJSON 陸域遮罩
+
+前處理預設會優先使用 OCM/SCHISM 原始 `SCHISM_hgrid_face_nodes` 建立靜態海域遮罩，並在來源資料提供 `wetdry_elem` 時套用逐時乾濕遮罩。若原始 mesh 在台灣本島、離島或海岸附近仍殘留少量被視為有效水體的格點，可額外提供本機 GeoJSON 面狀圖資給 `--land-geojson`，把落在陸域 polygon 內的規則格點從 `mask.npy` 扣除。
+
+已確認可用的來源：
+
+- OXXO.STUDIO 的「Google Maps API - 顯示台灣縣市 ( GeoJSON )」文章整理了台灣縣市行政區 GeoJSON/TopoJSON 來源，並示範使用縣市 GeoJSON 繪製台灣行政區。
+- `g0v/twgeojson` 提供台灣行政區 GeoJSON/TopoJSON；README 標示資料為 CC0 1.0 Universal。`json/twCounty2010.geo.json` 是可直接作為 `--land-geojson` 的 GeoJSON 檔，GitHub API 顯示大小約 9 MB。
+
+下載 g0v county-level GeoJSON 到本機資料夾：
+
+```bash
+mkdir -p data/geojson
+curl -L https://raw.githubusercontent.com/g0v/twgeojson/master/json/twCounty2010.geo.json \
+  -o data/geojson/twCounty2010.geo.json
+```
+
+`data/geojson/` 已列入 `.gitignore`。這些外部圖資應由下載指令與 `monthly_summary.json` 追蹤版本與路徑，不直接提交到專案。若改用 Sheethub 或其它正式岸線資料，只要檔案是 GeoJSON `Polygon` 或 `MultiPolygon`，也可用相同參數套用。
+
 ## 資料假設
 
 目前腳本針對常見 SCHISM NetCDF 結構設計：
@@ -68,6 +87,14 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
   --include-zcor-time
 ```
 
+若需要額外套用外部 GeoJSON 陸域遮罩，才在同一個前處理指令中加入以下參數。
+未加入此參數時，流程會維持原本的 OCM/SCHISM mesh mask 與 `wetdry_elem` 行為，
+不會讀取 GeoJSON，也不會改變 `mask.npy` 的靜態海域定義：
+
+```bash
+  --land-geojson data/geojson/twCounty2010.geo.json
+```
+
 輸出內容包含：
 
 - `lon.npy`、`lat.npy`：規則格點經緯度。
@@ -80,7 +107,9 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
 - `bathymetry.npy`：插值後水深。
 - `mask.npy`：有效海域遮罩。新版前處理會優先依原始 `SCHISM_hgrid_face_nodes`
   水平元素判斷靜態海域，避免 Delaunay 凸包把陸地洞補成流場；若原始資料提供
-  `wetdry_elem`，逐時乾出元素會在輸出的 `u/v/speed/zcor` 中直接寫成 NaN。
+  `wetdry_elem`，逐時乾出元素會在輸出的 `u/v/speed/zcor` 中直接寫成 NaN。若提供
+  `--land-geojson`，落在 GeoJSON 陸域 polygon 內的格點也會從 `mask.npy` 扣除，
+  並在 `bathymetry/u/v/speed/zcor` 寫成 NaN。
 - `monthly_summary.json`：流速統計、時間範圍、輸入檔案與參數。
 
 ## 3. 產生 2D 動畫
@@ -88,7 +117,7 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
 以下指令會重跑目前建議的主要 2D 成果圖，不會輸出 `flow_field_3d.png`。
 `--surface-animation` 固定輸出表層，`--layer-animation --layer-indices 0,16,32,-1`
 輸出多個代表模型垂向層。新版 2D 圖面使用固定淡藍色底圖，底圖不代表流速大小；
-流速大小由深藍色箭頭長度表示。`--target-arrows 500` 會讓箭頭比早期版本更密，
+流速大小由深藍色箭頭長度表示。`--target-arrows 1000` 會讓箭頭比早期版本更密，
 適合目前台灣 10 km / 3 小時 demo。
 
 ```bash
@@ -101,7 +130,39 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
   --layer-indices 0,16,32,-1 \
   --frame-stride 1 \
   --fps 8 \
-  --target-arrows 500
+  --target-arrows 1000
+```
+
+範例. 使用這組指令即可跑整月、10 km、台灣周邊 bbox，並套用 GeoJSON 陸地遮罩，輸出到指定位置：
+
+前處理資料:
+
+```bash
+uv run python3 scripts/preprocess_ocm_month.py \
+  --input-dir /Users/mustlab/Downloads/CWA-OCM/2025/01 \
+  --output-dir outputs/ocm_2025_01_taiwan_10km_geojson_qc \
+  --year 2025 \
+  --month 1 \
+  --domain-id taiwan-surrounding-geojson-qc \
+  --bbox 119.0 123.0 20.0 27.0 \
+  --target-resolution-km 10 \
+  --time-stride 3 \
+  --land-geojson data/geojson/twCounty2010.geo.json \
+  --include-zcor-time
+```
+
+產生 2D 表層動畫：
+
+```bash
+uv run python3 scripts/visualize_ocm_month.py \
+  --input-dir outputs/ocm_2025_01_taiwan_10km_geojson_qc \
+  --output-dir outputs/ocm_2025_01_taiwan_10km_geojson_qc/figures \
+  --surface-animation \
+  --layer-animation \
+  --layer-indices 0,16,32,-1 \
+  --frame-stride 1 \
+  --fps 2 \
+  --target-arrows 1000
 ```
 
 ## 4. 選用：產生三維示意圖
@@ -155,7 +216,7 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
 - `--layer-index`：指定單一 layer 動畫使用哪一個模型垂向層。未提供 `--layer-indices` 時，`--layer-animation` 會使用此參數；預設值是 `-1`，通常代表表層。
 - `--layer-indices`：指定多個 2D layer 動畫要輸出的模型層，逗號分隔，可混用正索引與負索引。例如 `0,16,32,-1` 會輸出底層、中間層與表層，檔名會分別包含 `bottom_layer_000`、`model_layer_016`、`model_layer_032`、`surface_layer_047`。
 - `--all-layers`：輸出每一個模型垂向層的 2D GIF。此選項會讓工作量約等於單層動畫乘上 layer 數；以本專案 48 層、248 幀資料為例，會繪製 11,904 張暫存 PNG 並合成 48 個 GIF，因此只建議在需要完整垂向檢查時使用。
-- `--target-arrows`：控制 2D 動畫每幀目標箭頭數，預設為 `500`。數值越大，抽樣間距越小、箭頭越密；新版圖面以箭頭長度代表流速大小，因此預設比早期版本更密。
+- `--target-arrows`：控制 2D 動畫每幀目標箭頭數，預設為 `1000`。數值越大，抽樣間距越小、箭頭越密；新版圖面以箭頭長度代表流速大小，因此預設比早期版本更密。
 - `--three-d-layers`：指定 3D 示意圖要畫哪些模型層，逗號分隔，可混用正索引與負索引。
 - `--three-d-time-index`：指定 3D 示意圖使用哪個時間步。`0` 代表月資料中的第一個 3 小時抽樣時間。
 - `--make-3d-animation`：輸出 3D 時間動畫，必須有 `zcor.npy`。此動畫使用逐時 zcor，不會用 `zcor_mean.npy` 假裝水位變動。
@@ -207,7 +268,7 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 ### `scripts/`
 
 - `scripts/inspect_ocm_netcdf.py`：檢查單一 OCM/SCHISM NetCDF 檔案結構，輸出維度、變數、屬性、時間軸與主要欄位範圍。用途是在正式前處理前確認 `hvel`、`zcor`、`depth`、`time` 等資料是否符合腳本假設；其 JSON 輸出目前只作為人工檢查紀錄，不會被月前處理腳本自動讀取。
-- `scripts/preprocess_ocm_month.py`：月資料前處理主程式。它會直接讀取單月所有 `*_schout.nc` 日檔，選取台灣鄰近 bbox，優先使用原始 `SCHISM_hgrid_face_nodes` 元素連結把非結構網格節點資料插值到規則經緯度格點；若來源檔缺少 face connectivity，才退回 Delaunay 重心權重。輸出包含 `u/v/speed/zcor_mean/bathymetry/mask` 等中間檔；目前不接受 inspect JSON 作為輸入。
+- `scripts/preprocess_ocm_month.py`：月資料前處理主程式。它會直接讀取單月所有 `*_schout.nc` 日檔，選取台灣鄰近 bbox，優先使用原始 `SCHISM_hgrid_face_nodes` 元素連結把非結構網格節點資料插值到規則經緯度格點；若來源檔缺少 face connectivity，才退回 Delaunay 重心權重。選用 `--land-geojson` 時，會在靜態 mesh mask 之外再扣除 GeoJSON 陸域 polygon，輸出包含 `u/v/speed/zcor_mean/bathymetry/mask` 等中間檔；目前不接受 inspect JSON 作為輸入。
 - `scripts/visualize_ocm_month.py`：月資料視覺化主程式。它讀取前處理輸出的 `.npy` 與 JSON metadata，產生表層流場 GIF、指定垂向層 GIF，以及含海底面參照的 3D 稀疏箭頭示意圖。
 - `scripts/__pycache__/`：Python 自動產生的 bytecode cache。這是可刪除、可重建資料夾，不影響專案邏輯。
 
@@ -232,7 +293,7 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 - `zcor_mean.npy`：每個垂向層在每個格點的月平均實際 z 座標，單位通常為公尺。此檔主要用於 3D 示意，不代表固定深度重採樣。
 - `zcor.npy`：逐時實際 z 座標，形狀為 `time, layer, lat, lon`，單位通常為公尺。此檔由 `--include-zcor-time` 產生，主要供 `--make-3d-animation` 呈現自由水面與模型層位隨時間變動。
 - `bathymetry.npy`：插值後水深，單位通常為公尺，正值代表海床深度。
-- `mask.npy`：規則格點靜態有效海域遮罩。`True` 代表該格點位於原始水體 mesh 且有可用海域資料，`False` 代表原始 mesh 外、插值無效或不應用於統計。若來源 NetCDF 有 `wetdry_elem(time, elem)`，前處理會另外依逐時乾濕狀態把乾出元素的 `u/v/speed/zcor` 設為 NaN；視覺化腳本會同時依 `mask.npy` 與 NaN 排除中性海域底圖和 quiver 箭頭。
+- `mask.npy`：規則格點靜態有效海域遮罩。`True` 代表該格點位於原始水體 mesh 且有可用海域資料，`False` 代表原始 mesh 外、插值無效、GeoJSON 陸域或不應用於統計。若來源 NetCDF 有 `wetdry_elem(time, elem)`，前處理會另外依逐時乾濕狀態把乾出元素的 `u/v/speed/zcor` 設為 NaN；視覺化腳本會同時依 `mask.npy` 與 NaN 排除中性海域底圖和 quiver 箭頭。
 - `monthly_summary.json`：月資料 metadata 與統計摘要，包含年月、bbox、輸入檔案、時間抽樣、格點大小、層數、時間起訖與流速統計。
 
 ### 圖像輸出資料夾
@@ -257,10 +318,9 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 - 若來源檔提供 `wetdry_elem`，前處理會採用 SCHISM 常見慣例 `0=wet、非 0=dry`
   逐時遮蔽乾出元素。`mask.npy` 不會變成三維逐時遮罩；乾濕變化已反映在
   `u/v/speed/zcor` 的 NaN 與 `monthly_summary.json` 的 `wetdry_elem` 區段。
-- 目前不額外套用外部 coastline/shoreline 陸域遮罩；若原始 OCM/SCHISM mesh 在
-  台灣本島內仍有少量元素或格點被視為有效水體，這些位置仍會保留為有效格點。
-  這是刻意回到原始 mesh/wetdry 定義的版本，後續若要修正海陸邊界，需先選定
-  合適的正式岸線資料與遮罩規則。
+- `--land-geojson` 是靜態陸域遮罩，適合修正本島、離島與行政區 polygon 內的
+  假水體格點；它不是逐時潮汐乾濕遮罩，也不會取代 `wetdry_elem`。遮罩演算法
+  假設 GeoJSON 使用 WGS84 `[lon, lat]` 座標，且 polygon 不跨日期變更線。
 - 垂向維度先沿用原檔層索引或 sigma 代表值，尚未重採樣到固定水深層。
 - 三維示意圖使用靜態稀疏箭頭，適合先期判讀；若要高品質互動流線，建議後續輸出 VTK/XDMF 給 ParaView 或 pyParaOcean。
 - 大範圍、高解析度、全時間步、全垂向層會產生大量中間檔，整年處理時應以月份為單位分批執行。
