@@ -16,3 +16,4 @@ work/
 # 這些檔案應由 README 的流程重建；只保留手寫/維護的圖像說明文件。
 outputs/*
 !outputs/figures_readme.md
+data/geojson/twCounty2010.geo.json

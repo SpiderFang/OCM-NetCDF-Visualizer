@@ -13,12 +13,14 @@
 - 針對目標的規則 (lon, lat) 格點，先計算一次元素內線性插值權重（vertices
     與 barycentric weights），這些權重可重複套用在每個時間與每個欄位上，節省計算。
 - 每個時間步：
-    1) 讀取 hvel（速度）與選擇性 zcor（實際層位）並將特殊缺值轉成 NaN；
+    1) 讀取 hvel（速度）、選擇性 zcor（實際層位）與選擇性 elev（自由水面高度），
+       並將特殊缺值轉成 NaN；
     2) 將 hvel 從非結構節點插值到規則格點（對每層與每一個分量分別插值），
        若來源檔提供 `wetdry_elem`，會依逐時元素乾濕狀態排除乾出格點；
     3) 若有 zcor，累加用於月平均計算；需要逐時水位/層位動畫時，可用
        `--include-zcor-time` 額外輸出完整 `zcor.npy`。
-- 最後將 `time, layer, lat, lon` 排列的 `u, v, speed` 與其它輔助陣列儲存為 .npy，
+- 最後將 `time, layer, lat, lon` 排列的 `u, v, speed`、`time, lat, lon`
+    排列的 `elev` 與其它輔助陣列儲存為 .npy，
     並寫出 metadata JSON（包含速度統計、時間範圍、格點資訊等）。
 
 實作注意事項：
@@ -588,6 +590,7 @@ def process_month(
     month: int,
     time_stride: int,
     include_zcor_time: bool,
+    include_elev: bool,
 ) -> None:
     """處理完整月資料並寫出中間檔。
 
@@ -595,6 +598,9 @@ def process_month(
     讀取，也讓後續研究區域分割能直接在 layer/lat/lon 軸上計算統計特徵。
     include_zcor_time 控制是否額外保存完整逐時 `zcor.npy`；此檔可呈現水位
     與 sigma/z 層位逐時變動，但大小約與單一流速分量相同，因此預設不輸出。
+    include_elev 控制是否讀取原始 `elev(time, node)` 並輸出成
+    `elev.npy(time, lat, lon)`；這個欄位是自由水面高度 η，適合用作 2D
+    表層流場底圖色階，但不應和流速 `speed` 共用單位或 colorbar。
     """
 
     # 建立輸出資料夾與目標格點
@@ -626,6 +632,11 @@ def process_month(
         # 讀取 depth 變數，作為插值成 bathymetry 的來源
         depth_var = first.variables["depth"]
         depth_values = clean_missing_values(depth_var[:], getattr(depth_var, "missing_value", None))
+        if include_elev and "elev" not in first.variables:
+            # `elev` 是 η（自由水面高度）的原始節點欄位；若使用者要求輸出
+            # 水位底圖卻缺少此變數，必須在前處理階段明確中止，避免後續視覺化
+            # 用 zcor 表層或其它欄位假冒 η 而造成物理意義錯置。
+            raise KeyError("Requested --include-elev but source NetCDF does not contain elev(time, node).")
 
     # 讀取 sigma（若存在）或回傳層索引
     sigma = read_sigma_or_layer_axis(files[0], layer_count)
@@ -642,6 +653,7 @@ def process_month(
     u_frames: list[np.ndarray] = []
     v_frames: list[np.ndarray] = []
     zcor_frames: list[np.ndarray] = []
+    elev_frames: list[np.ndarray] = []
     zcor_sum = np.zeros((layer_count, lat.size, lon.size), dtype=np.float64)
     zcor_count = np.zeros((layer_count, lat.size, lon.size), dtype=np.int32)
     wetdry_elem_applied = False
@@ -655,6 +667,11 @@ def process_month(
             times.extend(parse_times(ds, selected_times))
             hvel_var = ds.variables["hvel"]
             zcor_var = ds.variables["zcor"] if "zcor" in ds.variables else None
+            elev_var = ds.variables["elev"] if include_elev and "elev" in ds.variables else None
+            if include_elev and elev_var is None:
+                # 每個日檔都必須提供 elev，否則輸出的 elev.npy 時間軸會和
+                # u/v/speed 不一致。這裡不允許跳過缺檔，讓資料問題在產製時就暴露。
+                raise KeyError(f"Requested --include-elev but {path.name} does not contain elev.")
             wetdry_var = ds.variables["wetdry_elem"] if mesh_weights is not None and "wetdry_elem" in ds.variables else None
             for time_index in selected_times:
                 # wetdry_elem 是逐時、逐水平元素的乾濕旗標。靜態 mask 只表示格點落在
@@ -702,6 +719,21 @@ def process_month(
                 u_frames.append(u_layers)
                 v_frames.append(v_layers)
 
+                if elev_var is not None:
+                    # elev 是 SCHISM/OCM 原始輸出的自由水面高度 η，來源維度為
+                    # (time, node)。它位於水平節點而非垂向層，因此插值後輸出
+                    # 只需要 (lat, lon)。此欄位的單位在原檔未明寫，但數值範圍
+                    # 為公尺等級，且物理上代表相對基準面的海表面高度變化。
+                    raw_elev = clean_missing_values(elev_var[time_index], getattr(elev_var, "missing_value", None))
+                    if mesh_weights is not None:
+                        elev_grid = apply_mesh_interpolation(raw_elev, mesh_weights, grid_shape)
+                    else:
+                        elev_grid = apply_interpolation(raw_elev[node_window.indices], interpolation_weights, grid_shape)
+                    # 和速度場使用相同的逐時乾濕遮罩：乾出元素或陸域不應被水位底圖上色，
+                    # 否則 GIF 會在無效海域顯示 η，造成「有水位資料」的錯覺。
+                    elev_grid[~time_mask] = np.nan
+                    elev_frames.append(elev_grid.astype(np.float32, copy=False))
+
                 # 若有 zcor，插值並累加以計算月平均 zcor
                 if zcor_var is not None:
                     raw_zcor = clean_missing_values(zcor_var[time_index], getattr(zcor_var, "missing_value", None))
@@ -729,6 +761,11 @@ def process_month(
     v = np.stack(v_frames, axis=0)
     # 計算水平流速 magnitude
     speed = np.sqrt(u * u + v * v, dtype=np.float32)
+    elev = np.stack(elev_frames, axis=0) if include_elev else None
+    if include_elev and (elev is None or elev.shape[0] != len(times)):
+        # elev 必須與 time_iso、u/v/speed 完全同一個時間軸。若數量不一致，
+        # 代表某些檔案或時間步缺少水位資料，後續動畫會錯幀，因此主動失敗。
+        raise ValueError("Requested --include-elev but collected elev frames do not match selected times.")
 
     # 計算 zcor 的月平均（僅對有累計的點計算）
     zcor_mean = np.full_like(zcor_sum, np.nan, dtype=np.float32)
@@ -746,6 +783,11 @@ def process_month(
     np.save(output_dir / "bathymetry.npy", bathymetry)
     np.save(output_dir / "mask.npy", mask)
     np.save(output_dir / "zcor_mean.npy", zcor_mean)
+    if elev is not None:
+        # elev.npy 是 η（自由水面高度）的規則格點版本，形狀為 (time, lat, lon)。
+        # 它和 surface speed 的 shape 不同，因為 η 沒有垂向 layer 維度；視覺化時
+        # 只能當作背景標量場，不應拿來替代流速 magnitude。
+        np.save(output_dir / "elev.npy", elev.astype(np.float32, copy=False))
     if include_zcor_time:
         if len(zcor_frames) != len(times):
             raise ValueError("Requested --include-zcor-time but source files do not provide complete zcor time frames.")
@@ -768,6 +810,17 @@ def process_month(
             "p95": float(np.nanpercentile(speed, 95)),
             "max": float(np.nanmax(speed)),
         },
+        "elev_m": {
+            "included": bool(elev is not None),
+            "source_variable": "elev",
+            "meaning": "η / sea-surface elevation on SCHISM nodes, interpolated to time, lat, lon.",
+            "shape": list(elev.shape) if elev is not None else None,
+            "mean": float(np.nanmean(elev)) if elev is not None else None,
+            "p05": float(np.nanpercentile(elev, 5)) if elev is not None else None,
+            "p95": float(np.nanpercentile(elev, 95)) if elev is not None else None,
+            "min": float(np.nanmin(elev)) if elev is not None else None,
+            "max": float(np.nanmax(elev)) if elev is not None else None,
+        },
         "valid_ocean_fraction": float(np.isfinite(speed).mean()),
         "wetdry_elem": {
             "applied": bool(wetdry_elem_applied),
@@ -787,6 +840,9 @@ def process_month(
             "zcor_time_shape": [len(times), int(layer_count), int(lat.size), int(lon.size)]
             if include_zcor_time
             else None,
+            "elev": bool(elev is not None),
+            "elev_file": "elev.npy" if elev is not None else None,
+            "elev_shape": [len(times), int(lat.size), int(lon.size)] if elev is not None else None,
         },
     }
     (output_dir / "monthly_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -819,6 +875,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Save full time-varying zcor.npy for 3D animations that need water-level/layer motion.",
     )
+    parser.add_argument(
+        "--include-elev",
+        action="store_true",
+        help="Save elev.npy (η / sea-surface elevation) on the regular grid for water-level background maps.",
+    )
     parser.add_argument("--max-files", type=int, help="Optional cap for quick tests.")
     return parser.parse_args()
 
@@ -846,6 +907,7 @@ def main() -> None:
         args.month,
         args.time_stride,
         args.include_zcor_time,
+        args.include_elev,
     )
 
 

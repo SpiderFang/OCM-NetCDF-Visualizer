@@ -23,7 +23,9 @@
 - `time`：每個檔案內的時間軸，會優先使用 NetCDF `units` 與 `calendar` 轉成 ISO 時間字串。
 - `hvel`：水平流速，預期維度包含時間、節點、垂向層與東西/南北兩個分量。
 - `zcor`：每個時間、節點與垂向層的實際垂向座標，單位通常為公尺，表層接近水面、負值朝向海底。
-- `elev`：自由水面高度，單位通常為公尺。
+- `elev(time, node)`：自由水面高度 η（eta），原始資料位於 SCHISM 水平節點。
+  單位通常依 SCHISM 慣例為公尺；目前檢查到的 2025-01 檔案未明寫 `units`，
+  但數值範圍約為公尺等級，適合作為海表面高度變化與潮汐訊號的底圖欄位。
 
 若全年資料的變數名稱或維度順序不同，應先用檢查腳本確認，再調整變數參數或程式中的維度解析邏輯。
 
@@ -65,7 +67,8 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
   --bbox 119.0 123.0 20.0 27.0 \
   --target-resolution-km 10 \
   --time-stride 3 \
-  --include-zcor-time
+  --include-zcor-time \
+  --include-elev
 ```
 
 輸出內容包含：
@@ -75,6 +78,8 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
 - `time_iso.npy`：抽樣後時間字串。
 - `u.npy`、`v.npy`：插值後東西向與南北向流速，形狀為 `time, layer, lat, lon`。
 - `speed.npy`：水平流速大小。
+- `elev.npy`：自由水面高度 η，由原始 `elev(time, node)` 插值到規則格點，
+  形狀為 `time, lat, lon`，用於 2D 水位底圖或水位異常底圖。
 - `zcor_mean.npy`：每層在每個格點的月平均垂向座標。
 - `zcor.npy`：逐時垂向座標，形狀為 `time, layer, lat, lon`，用於需要呈現水位與 sigma/z 層位隨時間變動的 3D 動畫。此檔約與單一流速分量同等大小，只有加上 `--include-zcor-time` 才會輸出。
 - `bathymetry.npy`：插值後水深。
@@ -86,19 +91,27 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
 ## 3. 產生 2D 動畫
 
 以下指令會重跑目前建議的主要 2D 成果圖，不會輸出 `flow_field_3d.png`。
-`--surface-animation` 固定輸出表層，`--layer-animation --layer-indices 0,16,32,-1`
-輸出多個代表模型垂向層。新版 2D 圖面使用固定淡藍色底圖，底圖不代表流速大小；
-流速大小由深藍色箭頭長度表示。`--target-arrows 500` 會讓箭頭比早期版本更密，
-適合目前台灣 10 km / 3 小時 demo。
+研究分析圖與原始水位檢查圖分開輸出，不把 `elev` 與 `elev_anomaly` 混在同一張圖：
+
+- `--surface-elev-anomaly-animation`：主要研究圖，底圖為
+  `η'(x,y,t)=η(x,y,t)-monthly_mean(η)(x,y)`，適合看潮汐、水位變化與表層流場耦合。
+- `--surface-elev-animation`：原始資料檢查圖，底圖為未扣平均的 `η/elev`，適合確認模式水位輸出是否合理。
+- `--layer-animation --layer-indices 0,16,32,-1`：多垂向層流場比較，建議維持中性底圖，避免把表層水位色階套到中層或底層流速後造成解讀混淆。
+
+兩種 η 圖的 colorbar 單位都是公尺；流速大小仍由深藍色箭頭長度表示，箭頭方向表示流向。
+`--target-arrows 500` 會讓箭頭比早期版本更密，適合目前台灣 10 km / 3 小時 demo。
 
 ```bash
 UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
   uv run python3 scripts/visualize_ocm_month.py \
   --input-dir outputs/ocm_2025_01_taiwan_10km_3h \
   --output-dir outputs/ocm_2025_01_taiwan_10km_3h/figures \
+  --surface-elev-anomaly-animation \
+  --surface-elev-animation \
   --surface-animation \
   --layer-animation \
   --layer-indices 0,16,32,-1 \
+  --background neutral \
   --frame-stride 1 \
   --fps 8 \
   --target-arrows 500
@@ -137,14 +150,16 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
 
 輸出內容包含：
 
-- `surface_layer_047_horizontal_current_speed_quiver.gif`：由 `--surface-animation` 產生，固定使用最後一個模型垂向層，通常代表最上層或表層。檔名中的 `047` 是解析後的 layer index；不同資料若 layer 數改變，此數字也會跟著改變。
-- `bottom_layer_000_horizontal_current_speed_quiver.gif`、`model_layer_016_horizontal_current_speed_quiver.gif`、`model_layer_032_horizontal_current_speed_quiver.gif`：由 `--layer-animation --layer-indices 0,16,32,-1` 產生，代表多個指定模型垂向層的水平流場。這些 index 是 Python 陣列索引，不是固定水深，也不是公尺；實際深度需參考 `zcor_mean.npy`。
+- `surface_speed_elev_anomaly_quiver.gif`：由 `--surface-elev-anomaly-animation` 產生，是主要研究分析圖；底圖色彩代表同一格點相對月平均的 η 水位異常。
+- `surface_speed_elev_quiver.gif`：由 `--surface-elev-animation` 產生，是原始資料檢查圖；底圖色彩代表未扣平均的 η/elev 自由水面高度。
+- `bottom_layer_000_horizontal_current_speed_quiver.gif`、`model_layer_016_horizontal_current_speed_quiver.gif`、`model_layer_032_horizontal_current_speed_quiver.gif`：由 `--layer-animation --layer-indices 0,16,32,-1 --background neutral` 產生，代表多個指定模型垂向層的水平流場。這些 layer index 是 Python 陣列索引，不是固定水深，也不是公尺；實際深度需參考 `zcor_mean.npy`。
 - `flow_field_3d.png`：由選用的 `--make-3d --three-d-layers 0,16,32,-1` 指令產生，代表同一時間點的多個模型層三維示意。`0` 是底部附近模型層，`-1` 通常是表層，`16` 與 `32` 是中間指定層。圖中的 z 軸使用 `zcor_mean.npy` 並套用垂向縮放，因此是結構示意，不是真實比例的三維場景。
 - `flow_field_3d_time_layers_032_040_047.gif`：由 `--make-3d-animation --three-d-layers 32,40,-1` 產生，使用 `zcor.npy` 的逐時垂向座標，因此水面與所選 layer 會隨時間上下變動。此動畫刻意選近表層 layer，避免深海底層把 z 軸尺度拉大而看不出 1 公尺等級的水位起伏。
 
 動畫圖面判讀：
 
-- 固定淡藍色底圖只代表該 layer 在該水平位置有有效海域資料，不代表流速大小。
+- `surface_speed_elev_anomaly_quiver.gif` 的底圖色彩代表 `η'` 水位異常，單位為公尺；正負號代表相對該格點月平均水位的升降。
+- `surface_speed_elev_quiver.gif` 的底圖色彩代表原始 `η/elev` 自由水面高度，單位為公尺；此圖主要用於資料檢查。
 - 深藍色箭頭代表有效格點的水平流向與流速大小；方向表示流向，長度表示流速相對強弱。若 `speed/u/v` 任一分量缺值，該格點不畫箭頭。
 - 淡灰色區域代表該 layer 在該水平位置沒有有效資料，常見原因是該模型層位於局部海底以下或插值後為 NaN；淡灰色不是低流速，也不應解讀為靜水。
 
@@ -153,9 +168,12 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
 - `--input-dir`：讀取 `preprocess_ocm_month.py` 產生的月資料中間檔。
 - `--output-dir`：輸出 GIF 與 PNG 的資料夾。
 - `--layer-index`：指定單一 layer 動畫使用哪一個模型垂向層。未提供 `--layer-indices` 時，`--layer-animation` 會使用此參數；預設值是 `-1`，通常代表表層。
-- `--layer-indices`：指定多個 2D layer 動畫要輸出的模型層，逗號分隔，可混用正索引與負索引。例如 `0,16,32,-1` 會輸出底層、中間層與表層，檔名會分別包含 `bottom_layer_000`、`model_layer_016`、`model_layer_032`、`surface_layer_047`。
+- `--surface-elev-anomaly-animation`：輸出表層流速箭頭搭配 `η'` 水位異常底圖，是建議的主要研究圖。`η'` 目前定義為每個格點扣除該月平均 `elev`。
+- `--surface-elev-animation`：輸出表層流速箭頭搭配原始 `η/elev` 底圖，主要用於確認模式水位輸出。
+- `--layer-indices`：指定多個 2D layer 動畫要輸出的模型層，逗號分隔，可混用正索引與負索引。例如 `0,16,32,-1` 會輸出底層、中間層與表層；多層流場比較建議搭配 `--background neutral`。
 - `--all-layers`：輸出每一個模型垂向層的 2D GIF。此選項會讓工作量約等於單層動畫乘上 layer 數；以本專案 48 層、248 幀資料為例，會繪製 11,904 張暫存 PNG 並合成 48 個 GIF，因此只建議在需要完整垂向檢查時使用。
 - `--target-arrows`：控制 2D 動畫每幀目標箭頭數，預設為 `500`。數值越大，抽樣間距越小、箭頭越密；新版圖面以箭頭長度代表流速大小，因此預設比早期版本更密。
+- `--background`：控制一般 2D layer 動畫底圖。`neutral` 是固定海域底色；`elev` 使用 `elev.npy` 的 η 自由水面高度；`elev_anomaly` 會先扣除每個格點月平均 η。正式表層水位研究建議使用上方兩個專用旗標，讓研究圖與檢查圖分開產生。使用 `elev` 或 `elev_anomaly` 前，前處理必須加上 `--include-elev`。
 - `--three-d-layers`：指定 3D 示意圖要畫哪些模型層，逗號分隔，可混用正索引與負索引。
 - `--three-d-time-index`：指定 3D 示意圖使用哪個時間步。`0` 代表月資料中的第一個 3 小時抽樣時間。
 - `--make-3d-animation`：輸出 3D 時間動畫，必須有 `zcor.npy`。此動畫使用逐時 zcor，不會用 `zcor_mean.npy` 假裝水位變動。
@@ -183,7 +201,8 @@ for m in 01 02 03 04 05 06 07 08 09 10 11 12; do
     --domain-id taiwan-surrounding \
     --bbox 119.0 123.0 20.0 27.0 \
     --target-resolution-km 10 \
-    --time-stride 3
+    --time-stride 3 \
+    --include-elev
 done
 ```
 
@@ -207,8 +226,8 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 ### `scripts/`
 
 - `scripts/inspect_ocm_netcdf.py`：檢查單一 OCM/SCHISM NetCDF 檔案結構，輸出維度、變數、屬性、時間軸與主要欄位範圍。用途是在正式前處理前確認 `hvel`、`zcor`、`depth`、`time` 等資料是否符合腳本假設；其 JSON 輸出目前只作為人工檢查紀錄，不會被月前處理腳本自動讀取。
-- `scripts/preprocess_ocm_month.py`：月資料前處理主程式。它會直接讀取單月所有 `*_schout.nc` 日檔，選取台灣鄰近 bbox，優先使用原始 `SCHISM_hgrid_face_nodes` 元素連結把非結構網格節點資料插值到規則經緯度格點；若來源檔缺少 face connectivity，才退回 Delaunay 重心權重。輸出包含 `u/v/speed/zcor_mean/bathymetry/mask` 等中間檔；目前不接受 inspect JSON 作為輸入。
-- `scripts/visualize_ocm_month.py`：月資料視覺化主程式。它讀取前處理輸出的 `.npy` 與 JSON metadata，產生表層流場 GIF、指定垂向層 GIF，以及含海底面參照的 3D 稀疏箭頭示意圖。
+- `scripts/preprocess_ocm_month.py`：月資料前處理主程式。它會直接讀取單月所有 `*_schout.nc` 日檔，選取台灣鄰近 bbox，優先使用原始 `SCHISM_hgrid_face_nodes` 元素連結把非結構網格節點資料插值到規則經緯度格點；若來源檔缺少 face connectivity，才退回 Delaunay 重心權重。輸出包含 `u/v/speed/elev/zcor_mean/bathymetry/mask` 等中間檔；目前不接受 inspect JSON 作為輸入。
+- `scripts/visualize_ocm_month.py`：月資料視覺化主程式。它讀取前處理輸出的 `.npy` 與 JSON metadata，產生可選中性底圖或 η/elev 水位底圖的表層流場 GIF、指定垂向層 GIF，以及含海底面參照的 3D 稀疏箭頭示意圖。
 - `scripts/__pycache__/`：Python 自動產生的 bytecode cache。這是可刪除、可重建資料夾，不影響專案邏輯。
 
 ### `outputs/`
@@ -229,6 +248,7 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 - `u.npy`：插值後東西向流速，形狀為 `time, layer, lat, lon`，單位通常為 m/s。
 - `v.npy`：插值後南北向流速，形狀為 `time, layer, lat, lon`，單位通常為 m/s。
 - `speed.npy`：水平流速大小，由 `sqrt(u^2 + v^2)` 計算，形狀為 `time, layer, lat, lon`。
+- `elev.npy`：自由水面高度 η，由原始 `elev(time, node)` 插值而來，形狀為 `time, lat, lon`。此檔沒有 layer 維度，單位通常為公尺；視覺化時作為底圖色階，不能與 `speed` 的 m/s 色階混用。
 - `zcor_mean.npy`：每個垂向層在每個格點的月平均實際 z 座標，單位通常為公尺。此檔主要用於 3D 示意，不代表固定深度重採樣。
 - `zcor.npy`：逐時實際 z 座標，形狀為 `time, layer, lat, lon`，單位通常為公尺。此檔由 `--include-zcor-time` 產生，主要供 `--make-3d-animation` 呈現自由水面與模型層位隨時間變動。
 - `bathymetry.npy`：插值後水深，單位通常為公尺，正值代表海床深度。
@@ -239,7 +259,8 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 
 以下檔案位於月資料資料夾下的 `figures/`：
 
-- `surface_layer_047_horizontal_current_speed_quiver.gif`：表層中性底圖加箭頭動畫，用於快速觀察台灣鄰近表層流向與流速變化；底圖色彩不代表流速，箭頭長度才代表流速相對強弱；`047` 代表目前 48 層資料中的最後一層。
+- `surface_speed_elev_anomaly_quiver.gif`：表層 `η'` 水位異常底圖加箭頭動畫，是建議的主要研究圖，用於觀察台灣鄰近表層流向、流速變化與相對水位變化的關聯。底圖 colorbar 是 `η'` 公尺，箭頭長度才代表流速相對強弱。
+- `surface_speed_elev_quiver.gif`：表層原始 `η/elev` 底圖加箭頭動畫，是原始模式輸出檢查圖，用於確認自由水面高度範圍與空間分布是否合理。
 - `bottom_layer_000_horizontal_current_speed_quiver.gif`、`model_layer_016_horizontal_current_speed_quiver.gif`、`model_layer_032_horizontal_current_speed_quiver.gif`：指定垂向層的中性底圖加箭頭動畫，用於比較不同深度或模型層的流場差異。實際輸出層數由 `--layer-indices` 或 `--all-layers` 決定；圖中的淡灰色區域代表該 layer 沒有有效資料，不代表低流速。
 - `flow_field_3d.png`：3D 稀疏箭頭示意圖，使用 `zcor_mean.npy` 放置不同垂向層，並加上半透明海底面作為深度參照。
 - `flow_field_3d_time_layers_032_040_047.gif`：近表層 3D 時間動畫，使用 `zcor.npy` 放置每一幀的水面與模型層位；標題中的 `surface mean z` 是該幀表層平均水位，方便檢查水位逐時變化。
