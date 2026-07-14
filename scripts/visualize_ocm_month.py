@@ -168,8 +168,9 @@ def build_background_frames(
     background_mode 控制底圖物理量：`neutral` 表示不使用色階，只畫固定海域底色；
     `elev` 表示使用 η（原始 NetCDF 變數 `elev`，自由水面高度）；`elev_anomaly`
     表示先扣除每個格點的月平均 η，凸顯逐時水位偏差。輸出 frames 的形狀為
-    `(time, lat, lon)`，可直接與動畫 time index 對齊。norm 以 0 為中心，因為
-    η 的正負號代表相對基準面的上升或下降；這和流速大小的非負色階不可混用。
+    `(time, lat, lon)`，可直接與動畫 time index 對齊。色階上下限直接使用實際
+    繪製資料的有限值 min/max，不做百分位裁切或手動指定範圍；若資料範圍跨過
+    0，才用 TwoSlopeNorm 把 0 固定為中性中心，避免 η 類圖面和流速色階混用。
     """
 
     if background_mode == BACKGROUND_NEUTRAL:
@@ -209,14 +210,77 @@ def build_background_frames(
         background = elev
         label = "η / elev sea-surface elevation (m)"
 
-    finite_abs = np.abs(background[np.isfinite(background)])
-    limit = float(np.nanpercentile(finite_abs, 98)) if finite_abs.size else 1.0
-    if not np.isfinite(limit) or limit <= 0:
-        limit = 1.0
-    # 使用對稱色階讓 η=0 具有穩定視覺語意；少數極端值會被色階裁切，但原始
-    # 數值仍保留在資料陣列中，只是避免 GIF 因單一離群值而整體對比過低。
-    norm = matplotlib.colors.TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit)
+    finite_background = background[np.isfinite(background)]
+    if finite_background.size == 0:
+        raise ValueError(f"Background mode {background_mode} has no finite values to plot.")
+    data_min = float(np.nanmin(finite_background))
+    data_max = float(np.nanmax(finite_background))
+    # 學術圖面的 colorbar 上下限必須可追溯到實際資料，而不是任意指定或百分位裁切。
+    # 因此這裡直接使用目前動畫會繪出的 η/elev 或 η' 有效值 min/max。只有當範圍
+    # 同時包含負值與正值時，才把 0 設為發散色階中心；若原始 elev 全為正或全為負，
+    # 則保留真實資料上下限，不額外補一個不存在於資料範圍內的對稱端點。
+    if data_min < 0.0 < data_max:
+        norm = matplotlib.colors.TwoSlopeNorm(vmin=data_min, vcenter=0.0, vmax=data_max)
+    else:
+        norm = matplotlib.colors.Normalize(vmin=data_min, vmax=data_max)
     return background.astype(np.float32, copy=False), norm, label
+
+
+def format_eta_tick(value: float, boundary: str | None = None) -> str:
+    """格式化 η 色階刻度標籤。
+
+    η/elev 與 η anomaly 都是公尺量級；學術圖面需要明確呈現正負號與單位，
+    避免讀者只看到色條而無法判讀水位升降幅度。boundary 用於上下端點，明確
+    標示該端點就是本次圖面資料推算出的最小值或最大值，而不是任意色階設定。
+    """
+
+    prefix = ""
+    if boundary == "lower":
+        prefix = "min "
+    elif boundary == "upper":
+        prefix = "max "
+    return f"{prefix}{value:+.2f} m"
+
+
+def configure_eta_colorbar(
+    cbar: matplotlib.colorbar.Colorbar,
+    norm: matplotlib.colors.Normalize,
+    label: str,
+) -> None:
+    """設定符合研究圖需求的 η/η' colorbar。
+
+    Matplotlib 預設刻度可能不會剛好顯示上下限，動畫轉成 GIF 後也容易因解析度
+    讓端點標示不清楚。這裡強制把資料 min/max 放進刻度；若資料跨過 0，額外
+    加入 0 與兩側中間刻度，方便判讀正負水位變化。此設定只用於 η 類底圖；
+    流速箭頭仍不使用同一個 colorbar。
+    """
+
+    vmin = float(norm.vmin if norm.vmin is not None else 0.0)
+    vmax = float(norm.vmax if norm.vmax is not None else 0.0)
+    if np.isclose(vmin, vmax):
+        ticks = np.array([vmin], dtype=np.float64)
+        labels = [format_eta_tick(vmin)]
+    elif vmin < 0.0 < vmax:
+        ticks = np.array([vmin, 0.5 * vmin, 0.0, 0.5 * vmax, vmax], dtype=np.float64)
+        labels = [
+            format_eta_tick(vmin, "lower"),
+            format_eta_tick(0.5 * vmin),
+            format_eta_tick(0.0),
+            format_eta_tick(0.5 * vmax),
+            format_eta_tick(vmax, "upper"),
+        ]
+    else:
+        midpoint = 0.5 * (vmin + vmax)
+        ticks = np.array([vmin, midpoint, vmax], dtype=np.float64)
+        labels = [
+            format_eta_tick(vmin, "lower"),
+            format_eta_tick(midpoint),
+            format_eta_tick(vmax, "upper"),
+        ]
+    cbar.set_label(f"{label}\ndata-derived range: {vmin:+.2f} to {vmax:+.2f} m")
+    cbar.set_ticks(ticks)
+    cbar.set_ticklabels(labels)
+    cbar.ax.tick_params(labelsize=8)
 
 
 def frame_to_png(
@@ -286,7 +350,7 @@ def frame_to_png(
         background_layer = np.ma.masked_where(~np.isfinite(background), background)
         mesh = ax.pcolormesh(lon, lat, background_layer, shading="auto", cmap="RdBu_r", norm=background_norm)
         cbar = fig.colorbar(mesh, ax=ax, shrink=0.84, pad=0.025)
-        cbar.set_label(background_label or "η / elev (m)")
+        configure_eta_colorbar(cbar, background_norm, background_label or "η / elev (m)")
 
     # 計算箭頭採樣位置：傳入的 quiver_step 為 (y_step, x_step)
     sy, sx = quiver_step

@@ -98,7 +98,9 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
 - `--surface-elev-animation`：原始資料檢查圖，底圖為未扣平均的 `η/elev`，適合確認模式水位輸出是否合理。
 - `--layer-animation --layer-indices 0,16,32,-1`：多垂向層流場比較，建議維持中性底圖，避免把表層水位色階套到中層或底層流速後造成解讀混淆。
 
-兩種 η 圖的 colorbar 單位都是公尺；流速大小仍由深藍色箭頭長度表示，箭頭方向表示流向。
+兩種 η 圖的 colorbar 單位都是公尺，右側色條會固定標示實際繪圖資料推算出的
+最小值與最大值；若資料範圍跨過 0，會額外標示 0 作為正負水位變化的判讀中心。
+流速大小仍由深藍色箭頭長度表示，箭頭方向表示流向。
 `--target-arrows 500` 會讓箭頭比早期版本更密，適合目前台灣 10 km / 3 小時 demo。
 
 ```bash
@@ -160,6 +162,9 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
 
 - `surface_speed_elev_anomaly_quiver.gif` 的底圖色彩代表 `η'` 水位異常，單位為公尺；正負號代表相對該格點月平均水位的升降。
 - `surface_speed_elev_quiver.gif` 的底圖色彩代表原始 `η/elev` 自由水面高度，單位為公尺；此圖主要用於資料檢查。
+- η 類 colorbar 會明確標出實際繪圖資料的 `min` 與 `max`；這些上下限直接由
+  `elev.npy` 或由 `elev.npy` 推算出的 `η'` 有效格點取得，不使用自訂範圍或
+  百分位裁切。若資料範圍跨過 0，colorbar 會同時標示 0。
 - 深藍色箭頭代表有效格點的水平流向與流速大小；方向表示流向，長度表示流速相對強弱。若 `speed/u/v` 任一分量缺值，該格點不畫箭頭。
 - 淡灰色區域代表該 layer 在該水平位置沒有有效資料，常見原因是該模型層位於局部海底以下或插值後為 NaN；淡灰色不是低流速，也不應解讀為靜水。
 
