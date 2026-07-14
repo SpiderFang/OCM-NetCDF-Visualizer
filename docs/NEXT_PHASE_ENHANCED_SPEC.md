@@ -75,6 +75,16 @@
 
 ### P2：水位 `elev` 疊圖
 
+狀態：
+
+- 已在 `preprocess_ocm_month.py` 加入 `--include-elev`，可輸出
+  `elev.npy(time, lat, lon)`。
+- 已在 `visualize_ocm_month.py` 加入 `--surface-elev-anomaly-animation` 與
+  `--surface-elev-animation`，分別輸出研究分析用 `η'` 水位異常圖與原始
+  `η/elev` 檢查圖；兩者分開產生，不在同一張圖中混用。
+- 仍保留進階選項 `--background elev|elev_anomaly` 給一般 layer 動畫使用，但
+  多垂向層流場比較建議維持中性底圖，避免把表層水位色階套到不同 layer。
+
 目的：
 
 - 用於判讀潮汐、水位變化與流向轉換的關聯。
@@ -88,11 +98,12 @@
 
 視覺化：
 
-- 新增 `surface_speed_elev_quiver.gif`。
+- 新增 `surface_speed_elev_anomaly_quiver.gif` 作為主要研究分析圖。
+- 新增 `surface_speed_elev_quiver.gif` 作為原始模式水位檢查圖。
 - 背景選項：
   - `speed`：表層流速。
   - `elev`：水位。
-  - `elev_anomaly`：扣除月平均後的水位異常。
+  - `elev_anomaly`：扣除每格點月平均後的水位異常。
 - 箭頭仍使用表層 `hvel` 或 `dahv`。
 
 驗收標準：
@@ -100,6 +111,9 @@
 - 可用 CLI 選擇背景欄位。
 - 色階標籤清楚區分 `m/s` 與 `m`。
 - 不把水位與流速混用同一個 colorbar。
+- η/elev 與 η anomaly 的 colorbar 必須明確標示由實際繪圖資料推算出的 min/max
+  與單位；若資料範圍跨過 0，需標示 0 作為正負水位變化的判讀中心。色階上下限
+  不應使用手動自訂值或百分位裁切。
 
 ### P3：垂直流速 `vertical_velocity`
 
@@ -222,6 +236,7 @@
 ```bash
 --dahv-animation
 --surface-elev-animation
+--surface-elev-anomaly-animation
 --vertical-velocity-animation
 --tracer-map temp_surface_mean
 --background speed|elev|elev_anomaly|dahv_speed
@@ -286,6 +301,7 @@ outputs/
       model_layer_016_horizontal_current_speed_quiver.gif
       model_layer_032_horizontal_current_speed_quiver.gif
       dahv_speed_quiver.gif
+      surface_speed_elev_anomaly_quiver.gif
       surface_speed_elev_quiver.gif
       vertical_velocity_layer.gif
       flow_field_3d.png
@@ -350,11 +366,19 @@ done
 
 ## 9. 建議實作順序
 
+已完成：
+
+1. 擴充前處理支援 `--include-elev`。
+2. 擴充視覺化支援 `--surface-elev-anomaly-animation` 與
+   `--surface-elev-animation`，其中研究圖輸出為
+   `surface_speed_elev_anomaly_quiver.gif`，檢查圖輸出為
+   `surface_speed_elev_quiver.gif`。
+
+後續建議順序：
+
 1. 擴充前處理支援 `--include-dahv`。
 2. 擴充視覺化支援 `--dahv-animation`。
-3. 擴充前處理支援 `--include-elev`。
-4. 擴充視覺化支援 `--surface-elev-animation`。
-5. 新增月特徵摘要腳本 `scripts/summarize_ocm_month.py`。
-6. 評估是否加入 `vertical_velocity`。
-7. 評估是否加入溫鹽密度月平均產品。
-8. 最後再處理 `wetdry_elem` 的 face-to-grid 遮罩轉換。
+3. 新增月特徵摘要腳本 `scripts/summarize_ocm_month.py`。
+4. 評估是否加入 `vertical_velocity`。
+5. 評估是否加入溫鹽密度月平均產品。
+6. 最後再處理 `wetdry_elem` 的 face-to-grid 遮罩轉換。

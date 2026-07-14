@@ -1,15 +1,16 @@
 """從月資料中間檔產生 OCM 流場動畫與三維示意圖。
 
-本腳本讀取 preprocess_ocm_month.py 輸出的規則格點陣列。二維動畫採用中性
-海域底圖加 quiver 箭頭，並以箭頭長度直接表示水平流速大小；三維靜態示意圖採用月平均 zcor 作為垂向位置；若
+本腳本讀取 preprocess_ocm_month.py 輸出的規則格點陣列。二維動畫可採用中性
+海域底圖，或使用 η/elev 自由水面高度作為底圖色階，再加 quiver 箭頭以箭頭長度
+直接表示水平流速大小；三維靜態示意圖採用月平均 zcor 作為垂向位置；若
 前處理另外輸出 `zcor.npy`，三維時間動畫會使用逐時 zcor 呈現水位與層位變動，目的是
 先期觀察台灣周遭流場與可能的分割區域，而不是取代 ParaView/pyParaOcean
 等高階互動式三維分析工具。
 
 說明:
 - 讀取由 `preprocess_ocm_month.py` 所輸出的 NumPy 中間檔 (npy + JSON)
-- 產生二維的中性底圖並繪製箭頭 (quiver)，以箭頭方向表示流向、箭頭長度
-    表示流速大小；或輸出一張三維示意圖，使用月平均 `zcor_mean`
+- 產生二維底圖並繪製箭頭 (quiver)：底圖可選中性海域色或 η/elev 水位色階，
+    箭頭方向表示流向、箭頭長度表示流速大小；或輸出一張三維示意圖，使用月平均 `zcor_mean`
     作為垂向位置來表示層化結構。
 
 註記:
@@ -43,6 +44,12 @@ LAND_COLOR = "#f1ead8"
 OCEAN_COLOR = "#e7f2f3"
 # 二維箭頭顏色：在中性海域、淡灰缺值與淺色陸地上都要保持足夠對比。
 QUIVER_COLOR = "#123b5d"
+# 2D 底圖模式：neutral 保留舊版固定海色，elev 使用原始 `elev` 插值後的
+# η（自由水面高度），elev_anomaly 則先扣除每個格點月平均水位，用於凸顯潮汐
+# 或短期水位振盪。這些模式只改變底圖標量，不改變 quiver 的流速來源。
+BACKGROUND_NEUTRAL = "neutral"
+BACKGROUND_ELEV = "elev"
+BACKGROUND_ELEV_ANOMALY = "elev_anomaly"
 
 
 def load_month(input_dir: Path) -> dict[str, np.ndarray | dict]:
@@ -83,6 +90,12 @@ def load_month(input_dir: Path) -> dict[str, np.ndarray | dict]:
         # zcor.npy 是選擇性的大型逐時垂向座標檔，形狀為 (time, layer, lat, lon)。
         # 使用 mmap 讀取，讓 3D 時間動畫逐幀取用，不必一次把整個月的 zcor 載入記憶體。
         data["zcor"] = np.load(zcor_path, mmap_mode="r")
+    elev_path = input_dir / "elev.npy"
+    if elev_path.exists():
+        # elev.npy 是由原始 NetCDF `elev(time, node)` 插值而來的 η（自由水面高度），
+        # 形狀為 (time, lat, lon)。它沒有 layer 維度，代表同一時間的水面標量場；
+        # 視覺化時只能作為底圖色階，箭頭仍需來自 surface hvel 或指定 layer hvel。
+        data["elev"] = np.load(elev_path, mmap_mode="r")
     return data
 
 
@@ -144,6 +157,132 @@ def apply_ocean_mask(values: np.ndarray, ocean_mask: np.ndarray) -> np.ndarray:
     return masked
 
 
+def build_background_frames(
+    data: dict[str, np.ndarray | dict],
+    background_mode: str,
+    ocean_mask: np.ndarray,
+    expected_time_count: int,
+) -> tuple[np.ndarray | None, matplotlib.colors.Normalize | None, str | None]:
+    """準備 2D 動畫底圖標量場。
+
+    background_mode 控制底圖物理量：`neutral` 表示不使用色階，只畫固定海域底色；
+    `elev` 表示使用 η（原始 NetCDF 變數 `elev`，自由水面高度）；`elev_anomaly`
+    表示先扣除每個格點的月平均 η，凸顯逐時水位偏差。輸出 frames 的形狀為
+    `(time, lat, lon)`，可直接與動畫 time index 對齊。色階上下限直接使用實際
+    繪製資料的有限值 min/max，不做百分位裁切或手動指定範圍；若資料範圍跨過
+    0，才用 TwoSlopeNorm 把 0 固定為中性中心，避免 η 類圖面和流速色階混用。
+    """
+
+    if background_mode == BACKGROUND_NEUTRAL:
+        return None, None, None
+    if background_mode not in {BACKGROUND_ELEV, BACKGROUND_ELEV_ANOMALY}:
+        raise ValueError(f"Unsupported background mode: {background_mode}")
+    if "elev" not in data:
+        raise FileNotFoundError(
+            "Background mode elev/elev_anomaly requires elev.npy. "
+            "Re-run preprocess_ocm_month.py with --include-elev."
+        )
+
+    elev = np.asarray(data["elev"], dtype=np.float32).copy()
+    if elev.ndim != 3 or elev.shape[0] != expected_time_count or elev.shape[1:] != ocean_mask.shape:
+        # elev 沒有 layer 維度，必須和 time_iso 與水平格點完全對齊；若 shape 不符，
+        # 代表輸入資料夾混用了不同前處理版本或不同 bbox，繪圖會錯位。
+        raise ValueError(
+            f"elev shape {elev.shape} does not match expected (time, lat, lon) "
+            f"= ({expected_time_count}, {ocean_mask.shape[0]}, {ocean_mask.shape[1]})"
+        )
+
+    # 將靜態陸域或 mesh 外格點設為 NaN，確保水位底圖只出現在有效海域。
+    elev[:, ~ocean_mask] = np.nan
+    if background_mode == BACKGROUND_ELEV_ANOMALY:
+        # 月平均以每個格點獨立計算，保留空間上不同潮位基準或模式平均水位；
+        # 扣除後的值代表該格點相對自己月平均的逐時偏差。
+        finite_elev = np.isfinite(elev)
+        elev_sum = np.where(finite_elev, elev, 0.0).sum(axis=0, dtype=np.float64)
+        elev_count = finite_elev.sum(axis=0)
+        mean_elev = np.full(elev.shape[1:], np.nan, dtype=np.float32)
+        # 不使用 np.nanmean 的原因是陸地或 mesh 外格點整個月都可能是 NaN；
+        # 這些格點應安靜地保留為 NaN，不應在正常繪圖流程中產生空切片警告。
+        np.divide(elev_sum, elev_count, out=mean_elev, where=elev_count > 0)
+        background = elev - mean_elev[None, :, :]
+        label = "η anomaly from monthly mean (m)"
+    else:
+        background = elev
+        label = "η / elev sea-surface elevation (m)"
+
+    finite_background = background[np.isfinite(background)]
+    if finite_background.size == 0:
+        raise ValueError(f"Background mode {background_mode} has no finite values to plot.")
+    data_min = float(np.nanmin(finite_background))
+    data_max = float(np.nanmax(finite_background))
+    # 學術圖面的 colorbar 上下限必須可追溯到實際資料，而不是任意指定或百分位裁切。
+    # 因此這裡直接使用目前動畫會繪出的 η/elev 或 η' 有效值 min/max。只有當範圍
+    # 同時包含負值與正值時，才把 0 設為發散色階中心；若原始 elev 全為正或全為負，
+    # 則保留真實資料上下限，不額外補一個不存在於資料範圍內的對稱端點。
+    if data_min < 0.0 < data_max:
+        norm = matplotlib.colors.TwoSlopeNorm(vmin=data_min, vcenter=0.0, vmax=data_max)
+    else:
+        norm = matplotlib.colors.Normalize(vmin=data_min, vmax=data_max)
+    return background.astype(np.float32, copy=False), norm, label
+
+
+def format_eta_tick(value: float, boundary: str | None = None) -> str:
+    """格式化 η 色階刻度標籤。
+
+    η/elev 與 η anomaly 都是公尺量級；學術圖面需要明確呈現正負號與單位，
+    避免讀者只看到色條而無法判讀水位升降幅度。boundary 用於上下端點，明確
+    標示該端點就是本次圖面資料推算出的最小值或最大值，而不是任意色階設定。
+    """
+
+    prefix = ""
+    if boundary == "lower":
+        prefix = "min "
+    elif boundary == "upper":
+        prefix = "max "
+    return f"{prefix}{value:+.2f} m"
+
+
+def configure_eta_colorbar(
+    cbar: matplotlib.colorbar.Colorbar,
+    norm: matplotlib.colors.Normalize,
+    label: str,
+) -> None:
+    """設定符合研究圖需求的 η/η' colorbar。
+
+    Matplotlib 預設刻度可能不會剛好顯示上下限，動畫轉成 GIF 後也容易因解析度
+    讓端點標示不清楚。這裡強制把資料 min/max 放進刻度；若資料跨過 0，額外
+    加入 0 與兩側中間刻度，方便判讀正負水位變化。此設定只用於 η 類底圖；
+    流速箭頭仍不使用同一個 colorbar。
+    """
+
+    vmin = float(norm.vmin if norm.vmin is not None else 0.0)
+    vmax = float(norm.vmax if norm.vmax is not None else 0.0)
+    if np.isclose(vmin, vmax):
+        ticks = np.array([vmin], dtype=np.float64)
+        labels = [format_eta_tick(vmin)]
+    elif vmin < 0.0 < vmax:
+        ticks = np.array([vmin, 0.5 * vmin, 0.0, 0.5 * vmax, vmax], dtype=np.float64)
+        labels = [
+            format_eta_tick(vmin, "lower"),
+            format_eta_tick(0.5 * vmin),
+            format_eta_tick(0.0),
+            format_eta_tick(0.5 * vmax),
+            format_eta_tick(vmax, "upper"),
+        ]
+    else:
+        midpoint = 0.5 * (vmin + vmax)
+        ticks = np.array([vmin, midpoint, vmax], dtype=np.float64)
+        labels = [
+            format_eta_tick(vmin, "lower"),
+            format_eta_tick(midpoint),
+            format_eta_tick(vmax, "upper"),
+        ]
+    cbar.set_label(f"{label}\ndata-derived range: {vmin:+.2f} to {vmax:+.2f} m")
+    cbar.set_ticks(ticks)
+    cbar.set_ticklabels(labels)
+    cbar.ax.tick_params(labelsize=8)
+
+
 def frame_to_png(
     lon: np.ndarray,
     lat: np.ndarray,
@@ -156,11 +295,15 @@ def frame_to_png(
     quiver_step: tuple[int, int],
     layer_label: str,
     ocean_mask: np.ndarray,
+    background: np.ndarray | None = None,
+    background_norm: matplotlib.colors.Normalize | None = None,
+    background_label: str | None = None,
 ) -> None:
     """繪製單一時間步水平流場圖。
 
-    二維圖面不再用底圖色階表示速度大小，而是以固定海域底色作為空間參照，
-    再用箭頭方向表示流向、箭頭長度表示東西與南北向速度分量合成後的流速。
+    二維圖面可使用固定海域底色，或把 `background` 解讀為 η/elev 水位場並用
+    色階呈現；不論底圖模式為何，流速大小一律由箭頭長度表示。若使用 η 底圖，
+    colorbar 的單位是公尺，不能被解讀成 m/s；箭頭仍來自 u/v 分量。
     此圖是年度快速總覽的基礎，適合檢查黑潮主軸、台灣海峽交換與局部流向轉換。
     layer_label 會寫入標題，避免單獨檢視 PNG/GIF 時無法判斷它代表哪個
     模型垂向層；這裡的 layer 是模式陣列索引，不等同固定水深或公尺數。
@@ -178,6 +321,11 @@ def frame_to_png(
     speed = apply_ocean_mask(speed, ocean_mask)
     u = apply_ocean_mask(u, ocean_mask)
     v = apply_ocean_mask(v, ocean_mask)
+    if background is not None:
+        # background 目前代表 η/elev 或 η anomaly，維度必須是 (lat, lon)。
+        # 再次套用 ocean_mask 是防禦性處理，避免舊版 elev.npy 或外部產製資料
+        # 在陸地格點保留數值而被底圖上色。
+        background = apply_ocean_mask(background, ocean_mask)
 
     # 在最底層先畫陸地底色。MISSING_DATA_COLOR 保留給海域內 layer 缺值，
     # LAND_COLOR 則只對應水平 mask=False，讓海洋/陸地/缺值三者可被目視區分。
@@ -189,12 +337,20 @@ def frame_to_png(
     # 後續的固定海域底圖只畫在 speed 有限的位置，因此不會把缺值區染成海域。
     ax.set_facecolor(MISSING_DATA_COLOR)
 
-    # 畫固定海域底色：有效速度格點代表該 layer 在此水平位置有可判讀水體。
-    # 顏色不承載速度大小，避免把背景色誤解為流速色階；速度大小只由箭頭長度表示。
     valid_speed = np.isfinite(speed)
-    ocean_layer = np.ma.masked_where(~valid_speed, np.ones_like(speed, dtype=np.float32))
-    ocean_cmap = matplotlib.colors.ListedColormap([OCEAN_COLOR])
-    ax.pcolormesh(lon, lat, ocean_layer, shading="auto", cmap=ocean_cmap, vmin=0, vmax=1)
+    if background is None:
+        # 畫固定海域底色：有效速度格點代表該 layer 在此水平位置有可判讀水體。
+        # 顏色不承載速度大小，避免把背景色誤解為流速色階；速度大小只由箭頭長度表示。
+        ocean_layer = np.ma.masked_where(~valid_speed, np.ones_like(speed, dtype=np.float32))
+        ocean_cmap = matplotlib.colors.ListedColormap([OCEAN_COLOR])
+        ax.pcolormesh(lon, lat, ocean_layer, shading="auto", cmap=ocean_cmap, vmin=0, vmax=1)
+    else:
+        # η 底圖使用水位本身的有效值決定上色範圍；若某些格點有速度但沒有 elev，
+        # 會維持缺值色，避免把缺少水位資料的位置誤畫成中性海域。
+        background_layer = np.ma.masked_where(~np.isfinite(background), background)
+        mesh = ax.pcolormesh(lon, lat, background_layer, shading="auto", cmap="RdBu_r", norm=background_norm)
+        cbar = fig.colorbar(mesh, ax=ax, shrink=0.84, pad=0.025)
+        configure_eta_colorbar(cbar, background_norm, background_label or "η / elev (m)")
 
     # 計算箭頭採樣位置：傳入的 quiver_step 為 (y_step, x_step)
     sy, sx = quiver_step
@@ -222,8 +378,12 @@ def frame_to_png(
         alpha=0.9,
     )
 
-    # 標題與座標標籤
-    ax.set_title(f"OCM {layer_label} horizontal current | {timestamp}")
+    # 標題與座標標籤。水位異常與原始水位雖然都來自 elev，但學術判讀語意不同；
+    # 因此標題也分開標示，避免單看 GIF 時把 η' 誤解為未扣平均的 η。
+    background_title = ""
+    if background is not None:
+        background_title = " over η anomaly" if background_label and "anomaly" in background_label else " over η"
+    ax.set_title(f"OCM {layer_label} horizontal current{background_title} | {timestamp}")
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     # 使用等比例顯示，以避免長寬比扭曲流向
@@ -243,12 +403,15 @@ def make_layer_animation(
     fps: int,
     target_arrows: int,
     layer_label: str | None = None,
+    background_mode: str = BACKGROUND_NEUTRAL,
 ) -> None:
     """輸出指定垂向層的水平流場 GIF。
 
     frame_stride 是視覺化階段的再次抽樣，與前處理 time_stride 不同。前者用來
     控制 GIF 幀數，後者決定中間檔保留多少時間解析度。output_path 應由呼叫端
     指定成可辨識用途的檔名，避免多層輸出時互相覆蓋或難以追蹤。
+    background_mode 只控制底圖標量場；箭頭來源仍是同一層的 u/v，箭頭長度仍
+    使用同一段動畫的速度百分位作為縮放基準。
     """
 
     # 取出必要欄位
@@ -259,6 +422,12 @@ def make_layer_animation(
     v = data["v"]
     speed = data["speed"]
     ocean_mask = normalize_ocean_mask(data["mask"], (len(lat), len(lon)))
+    background_frames, background_norm, background_label = build_background_frames(
+        data,
+        background_mode,
+        ocean_mask,
+        speed.shape[0],
+    )
 
     # 將使用者傳入的 layer_index 解析為合法索引
     layer = resolve_layer_index(layer_index, speed.shape[1])
@@ -295,6 +464,9 @@ def make_layer_animation(
             quiver_step,
             label,
             ocean_mask,
+            None if background_frames is None else background_frames[time_index],
+            background_norm,
+            background_label,
         )
         frame_paths.append(frame_path)
 
@@ -339,15 +511,24 @@ def layer_animation_label(layer: int, layer_count: int) -> str:
     return f"model layer {layer:03d}"
 
 
-def layer_animation_filename(layer: int, layer_count: int) -> str:
+def layer_animation_filename(layer: int, layer_count: int, background_mode: str = BACKGROUND_NEUTRAL) -> str:
     """建立不會互相覆蓋且能看出用途的 GIF 檔名。
 
-    檔名格式為 `{role}_layer_{index}_horizontal_current_speed_quiver.gif`。
-    其中 role 表示底層、表層或一般模型層；index 使用三位數補零，讓大量
-    layer 檔案在檔案總管中可依垂向順序排序。
+    中性底圖沿用舊檔名 `{role}_layer_{index}_horizontal_current_speed_quiver.gif`。
+    若底圖改為 η/elev，表層輸出使用 `surface_speed_elev_quiver.gif` 這個較
+    直觀的成果名；其它 layer 則在檔名中加入 `eta_background` 或
+    `eta_anomaly_background`，避免和中性底圖版本互相覆蓋。
     """
 
     role = layer_role_name(layer, layer_count)
+    if background_mode == BACKGROUND_ELEV and role == "surface":
+        return "surface_speed_elev_quiver.gif"
+    if background_mode == BACKGROUND_ELEV_ANOMALY and role == "surface":
+        return "surface_speed_elev_anomaly_quiver.gif"
+    if background_mode == BACKGROUND_ELEV:
+        return f"{role}_layer_{layer:03d}_horizontal_current_eta_background_quiver.gif"
+    if background_mode == BACKGROUND_ELEV_ANOMALY:
+        return f"{role}_layer_{layer:03d}_horizontal_current_eta_anomaly_background_quiver.gif"
     return f"{role}_layer_{layer:03d}_horizontal_current_speed_quiver.gif"
 
 
@@ -376,12 +557,14 @@ def make_multiple_layer_animations(
     frame_stride: int,
     fps: int,
     target_arrows: int,
+    background_mode: str = BACKGROUND_NEUTRAL,
 ) -> list[Path]:
     """依指定 layer 清單輸出多個水平流場 GIF。
 
     此函式是避免只產生單一泛用檔名的主要入口。每個 layer 會輸出成獨立檔案，
-    檔名含有角色、三位數 layer index、水平流速與 quiver 資訊；回傳值則提供
-    實際輸出的檔案清單，方便未來接續產生索引頁或報告。
+    檔名含有角色、三位數 layer index、底圖來源與 quiver 資訊；回傳值則提供
+    實際輸出的檔案清單，方便未來接續產生索引頁或報告。background_mode 會
+    傳入單層動畫函式，確保多層輸出使用同一種底圖語意。
     """
 
     speed = data["speed"]
@@ -389,7 +572,7 @@ def make_multiple_layer_animations(
     output_paths: list[Path] = []
 
     for layer in resolve_unique_layers(layer_indices, layer_count):
-        output_path = output_dir / layer_animation_filename(layer, layer_count)
+        output_path = output_dir / layer_animation_filename(layer, layer_count, background_mode)
         make_layer_animation(
             data,
             output_path,
@@ -398,9 +581,45 @@ def make_multiple_layer_animations(
             fps,
             target_arrows,
             layer_animation_label(layer, layer_count),
+            background_mode,
         )
         output_paths.append(output_path)
     return output_paths
+
+
+def make_surface_elevation_animation(
+    data: dict[str, np.ndarray | dict],
+    output_dir: Path,
+    frame_stride: int,
+    fps: int,
+    target_arrows: int,
+    background_mode: str,
+) -> Path:
+    """輸出表層流場搭配 η 類底圖的單一 GIF。
+
+    此函式只允許 `elev` 或 `elev_anomaly` 兩種水位底圖，目的是把學術分析圖
+    和原始資料檢查圖拆成兩個獨立產品：`elev_anomaly` 用於研究潮汐/水位變化
+    與表層流場耦合，`elev` 用於檢查原始自由水面高度是否合理。它固定使用
+    表層 hvel 箭頭，避免把表層水位底圖套到中層或底層流速後造成垂向語意混淆。
+    """
+
+    if background_mode not in {BACKGROUND_ELEV, BACKGROUND_ELEV_ANOMALY}:
+        raise ValueError("Surface elevation animation requires elev or elev_anomaly background mode.")
+    speed = data["speed"]
+    layer_count = speed.shape[1]
+    surface_layer = resolve_layer_index(-1, layer_count)
+    output_path = output_dir / layer_animation_filename(surface_layer, layer_count, background_mode)
+    make_layer_animation(
+        data,
+        output_path,
+        surface_layer,
+        frame_stride,
+        fps,
+        target_arrows,
+        layer_animation_label(surface_layer, layer_count),
+        background_mode,
+    )
+    return output_path
 
 
 def make_3d_static(
@@ -702,6 +921,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", required=True, type=Path, help="Directory from preprocess_ocm_month.py.")
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory for figures and animations.")
     parser.add_argument("--surface-animation", action="store_true", help="Create surface-layer GIF.")
+    parser.add_argument(
+        "--surface-elev-animation",
+        action="store_true",
+        help="Create surface-current GIF with raw elev/η background for model-output checks.",
+    )
+    parser.add_argument(
+        "--surface-elev-anomaly-animation",
+        action="store_true",
+        help="Create surface-current GIF with elev anomaly background for research analysis.",
+    )
     parser.add_argument("--layer-animation", action="store_true", help="Create GIFs for selected layer indices.")
     parser.add_argument("--layer-index", type=int, default=-1, help="Layer index for layer animation; -1 usually means surface.")
     parser.add_argument(
@@ -717,6 +946,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame-stride", type=int, default=1, help="Use every Nth preprocessed frame in GIF.")
     parser.add_argument("--fps", type=int, default=6, help="GIF frames per second.")
     parser.add_argument("--target-arrows", type=int, default=1000, help="Approximate number of quiver arrows per frame.")
+    parser.add_argument(
+        "--background",
+        choices=(BACKGROUND_NEUTRAL, BACKGROUND_ELEV, BACKGROUND_ELEV_ANOMALY),
+        default=BACKGROUND_NEUTRAL,
+        help="2D animation background: neutral ocean fill, elev η field, or elev anomaly from monthly mean.",
+    )
     parser.add_argument("--make-3d", action="store_true", help="Create static 3D current-field sketch.")
     parser.add_argument(
         "--make-3d-animation",
@@ -743,16 +978,39 @@ def main() -> None:
     data = load_month(args.input_dir)
     speed = data["speed"]
     layer_count = speed.shape[1]
+    if args.surface_elev_anomaly_animation:
+        # 研究分析圖：底圖使用 η' = η - 月平均 η，只呈現相對水位變化；箭頭仍
+        # 使用表層 hvel。這和原始 elev 檢查圖分開輸出，避免同一張圖混用兩種水位語意。
+        make_surface_elevation_animation(
+            data,
+            args.output_dir,
+            args.frame_stride,
+            args.fps,
+            args.target_arrows,
+            BACKGROUND_ELEV_ANOMALY,
+        )
+    if args.surface_elev_animation:
+        # 原始資料檢查圖：底圖使用未扣平均的 η/elev，用於檢查模式輸出的自由水面
+        # 高度是否合理；正式潮汐或流場耦合分析應優先看 elev_anomaly 版本。
+        make_surface_elevation_animation(
+            data,
+            args.output_dir,
+            args.frame_stride,
+            args.fps,
+            args.target_arrows,
+            BACKGROUND_ELEV,
+        )
     if args.surface_animation:
         surface_layer = resolve_layer_index(-1, layer_count)
         make_layer_animation(
             data,
-            args.output_dir / layer_animation_filename(surface_layer, layer_count),
+            args.output_dir / layer_animation_filename(surface_layer, layer_count, args.background),
             surface_layer,
             args.frame_stride,
             args.fps,
             args.target_arrows,
             layer_animation_label(surface_layer, layer_count),
+            args.background,
         )
     if args.layer_animation:
         # 多層輸出的優先序：明確要求全部層時使用完整 range；否則使用
@@ -780,6 +1038,7 @@ def main() -> None:
             args.frame_stride,
             args.fps,
             args.target_arrows,
+            args.background,
         )
     if args.make_3d:
         make_3d_static(
