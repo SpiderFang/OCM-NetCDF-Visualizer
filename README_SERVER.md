@@ -160,6 +160,59 @@ tail -f work/logs/ocm_2025_year/2025_02_preprocess.log
 `REPROCESS=0` 代表若某月份必要輸出已存在且完整，就跳過該月份；若需要強制重跑
 2 月到 5 月，才改成 `REPROCESS=1`。
 
+## 其它年份資料集：2024 平放日檔
+
+`scripts/run_ocm_2025_year.sh` 雖然檔名含有 `2025`，但年份、來源根目錄與來源結構都可
+用環境變數覆蓋。若 2024 年資料集位於 `/CWA-OCM/2024`，且日檔同樣平放在該目錄下，
+例如 `/CWA-OCM/2024/20240101_schout.nc`，不需要修改 shell 檔本身，只要在執行時指定：
+
+- `YEAR=2024`：讓腳本尋找 `2024MMDD_schout.nc`，並把輸出命名成 `ocm_2024_MM_*`。
+- `SOURCE_ROOT=/CWA-OCM/2024`：指定 2024 原始 NetCDF 所在根目錄。
+- `SOURCE_LAYOUT=flat`：表示日檔平放在年份根目錄，腳本會建立每月 symlink staging。
+
+單月處理 2024 年 1 月：
+
+```bash
+cd /home/mustlab/Workspace/OCM-NetCDF-Visualizer
+
+YEAR=2024 \
+SOURCE_ROOT=/CWA-OCM/2024 \
+SOURCE_LAYOUT=flat \
+MONTHS=01 \
+RUN_VISUALIZE=0 \
+RUN_3D=0 \
+RUN_3D_ANIMATION=0 \
+INCLUDE_ELEV=1 \
+INCLUDE_ZCOR_TIME=1 \
+REPROCESS=0 \
+bash scripts/run_ocm_2025_year.sh
+```
+
+處理下一個月份時只要改 `MONTHS`，例如 `MONTHS=02`。輸出與工作目錄會自動改用
+2024 年份：
+
+```text
+outputs/ocm_2024_01_taiwan_10km_3h
+work/month_inputs/2024/01
+work/logs/ocm_2024_year
+```
+
+若要一次補跑 2024 年 2 月到 5 月：
+
+```bash
+cd /home/mustlab/Workspace/OCM-NetCDF-Visualizer
+
+YEAR=2024 \
+SOURCE_ROOT=/CWA-OCM/2024 \
+SOURCE_LAYOUT=flat \
+MONTHS="02 03 04 05" \
+RUN_VISUALIZE=0 \
+INCLUDE_ELEV=1 \
+INCLUDE_ZCOR_TIME=1 \
+REPROCESS=0 \
+bash scripts/run_ocm_2025_year.sh
+```
+
 ## 單月背景執行與監看
 
 若 VS Code terminal 可能中斷，可用 `nohup` 讓單月工作留在 server 背景執行：
