@@ -1,6 +1,6 @@
 # OCM 海流資料三維流場示意與月資料動畫流程
 
-本專案以中央氣象署 OCM NetCDF 月資料為起點，建立可從「單月資料」擴充到「整年時間序列」的處理與視覺化管線。現階段先針對本機一月份資料夾 `/Users/mustlab/Downloads/CWA-OCM/2025/01` 實作，後續只要替換輸入路徑與年月參數，即可批次處理伺服器上的全年資料。
+本專案以中央氣象署 OCM NetCDF 月資料為起點，建立可從「單月資料」逐步擴充到「整年時間序列」的處理與視覺化管線。現階段先針對本機一月份資料夾 `/Users/mustlab/Downloads/CWA-OCM/2025/01` 實作；搬到 server 後建議維持月份為單位，一個月處理、檢查完成後再啟動下一批月份。
 
 ## 目標
 
@@ -46,7 +46,7 @@ curl -L https://raw.githubusercontent.com/g0v/twgeojson/master/json/twCounty2010
   單位通常依 SCHISM 慣例為公尺；目前檢查到的 2025-01 檔案未明寫 `units`，
   但數值範圍約為公尺等級，適合作為海表面高度變化與潮汐訊號的底圖欄位。
 
-若全年資料的變數名稱或維度順序不同，應先用檢查腳本確認，再調整變數參數或程式中的維度解析邏輯。
+若其它月份資料的變數名稱或維度順序不同，應先用檢查腳本確認，再調整變數參數或程式中的維度解析邏輯。
 
 ## 安裝
 
@@ -60,6 +60,12 @@ cd /Users/mustlab/Workspace/OCM-NetCDF-Visualizer
 UV_CACHE_DIR=work/uv-cache uv sync
 ```
 
+## Server 操作
+
+Server / VS Code Remote SSH 的前處理、月份批次、畫圖、3D 與監看指令已移到
+[`README_SERVER.md`](README_SERVER.md)。主 README 只保留本機與共通流程，避免操作
+指令混在一起。
+
 ## 1. 檢查一月份 NetCDF 結構
 
 ```bash
@@ -72,7 +78,7 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/inspect_ocm_netcdf.py \
 
 ## 2. 前處理一月份資料
 
-以下範例先取台灣鄰近海域，經度 `[119, 123]`、緯度 `[20, 27]`，並使用 10 km 解析度與 3 小時抽樣。這個設定比早期 smoke test 更細，適合作為一月份正式 demo 與後續全年批次處理的基準設定：
+以下範例先取台灣鄰近海域，經度 `[119, 123]`、緯度 `[20, 27]`，並使用 10 km 解析度與 3 小時抽樣。這個設定比早期 smoke test 更細，適合作為一月份正式 demo 與後續其它月份處理的基準設定：
 
 `preprocess_ocm_month.py` 會直接讀取 `--input-dir` 內排序後的 `*_schout.nc` 原始 NetCDF 日檔，並從第一個檔案推斷 `hvel` 維度順序、垂向層數、`depth`、`sigma` 等必要資訊。若前一步產生了 inspect JSON，該檔只用來讓開發者比對資料結構與腳本假設，不會參與本步驟運算。
 
@@ -121,7 +127,9 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
 
 ## 3. 產生 2D 動畫
 
-以下指令會重跑目前建議的主要 2D 成果圖，不會輸出 `flow_field_3d.png`。
+前處理完成後，`visualize_ocm_month.py` 會讀取月份資料夾內的 `lon/lat/time_iso/u/v/speed/elev/mask`
+等 `.npy` 中間檔，並把 GIF/PNG 寫到該月份的 `figures/` 子資料夾。以下指令會重跑
+目前建議的主要 2D 成果圖，不會輸出 `flow_field_3d.png`。
 研究分析圖與原始水位檢查圖分開輸出，不把 `elev` 與 `elev_anomaly` 混在同一張圖：
 
 - `--surface-elev-anomaly-animation`：主要研究圖，底圖為
@@ -135,6 +143,8 @@ UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
 流速大小仍由深藍色箭頭長度表示，箭頭方向表示流向。
 `--target-arrows 1000` 會讓箭頭比早期版本更密，適合目前台灣 10 km / 3 小時 demo。
 
+以下是一月份 demo 的同等指令，可用來重畫本機或既有一月主要成果圖：
+
 ```bash
 UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
   uv run python3 scripts/visualize_ocm_month.py \
@@ -147,11 +157,13 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
   --layer-indices 0,16,32,-1 \
   --background neutral \
   --frame-stride 1 \
-  --fps 8 \
+  --fps 2 \
   --target-arrows 1000
 ```
 
-範例. 使用這組指令即可跑整月、10 km、台灣周邊 bbox，並套用 GeoJSON 陸地遮罩，輸出到指定位置：
+### GeoJSON 陸地遮罩 QC 範例
+
+以下範例使用整月、10 km、台灣周邊 bbox，並套用 GeoJSON 陸地遮罩，輸出到指定位置：
 
 前處理資料:
 
@@ -203,7 +215,9 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
   --three-d-xy-step 3
 ```
 
-近表層 3D 時間動畫範例：
+近表層 3D 時間動畫需要前處理時有輸出 `zcor.npy`，也就是前處理曾使用
+`--include-zcor-time` 或 `INCLUDE_ZCOR_TIME=1`。此動畫會比 2D GIF 更耗時，建議在
+主要 2D 圖完成後再產生：
 
 ```bash
 UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
@@ -263,22 +277,8 @@ fps 1：約 248 秒
 
 ## 擴充到整年資料
 
-一月份流程穩定後，可用相同腳本逐月處理伺服器資料：
-
-```bash
-for m in 01 02 03 04 05 06 07 08 09 10 11 12; do
-  UV_CACHE_DIR=work/uv-cache uv run python3 scripts/preprocess_ocm_month.py \
-    --input-dir /server/path/CWA-OCM/2025/$m \
-    --output-dir outputs/ocm_2025_$m \
-    --year 2025 \
-    --month $m \
-    --domain-id taiwan-surrounding \
-    --bbox 119.0 123.0 20.0 27.0 \
-    --target-resolution-km 10 \
-    --time-stride 3 \
-    --include-elev
-done
-```
+一月份流程穩定後，建議維持月份為單位逐步處理與檢查。Server 端的單月、多月補跑、
+背景執行、畫圖與監看指令請見 [`README_SERVER.md`](README_SERVER.md)。
 
 年度研究區域分割建議在月資料中間檔上計算特徵，例如月平均流速、主流向、季節變化、渦度、散度、垂直剪切與粒子停留時間。這些特徵比單純影片更適合後續分群與區域邊界判讀。
 
@@ -292,7 +292,8 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 
 ### 根目錄
 
-- `README.md`：專案主要說明文件，記錄資料假設、執行流程、輸出格式、整年擴充方式與限制。後續若修改 bbox、深度層、時間抽樣或輸出策略，應同步更新此文件。
+- `README.md`：專案主要說明文件，記錄本機資料假設、共通執行流程、輸出格式與限制。後續若修改 bbox、深度層、時間抽樣或輸出策略，應同步更新此文件。
+- `README_SERVER.md`：server 專用操作文件，集中記錄 VS Code Remote SSH、server 資料路徑、月份批次、背景執行、監看與畫圖指令。
 - `pyproject.toml`：Python 專案與相依套件設定。此檔定義需要的 Python 版本與 `numpy`、`scipy`、`netCDF4`、`matplotlib`、`imageio` 等套件，讓環境可用 `uv sync` 重建。
 - `uv.lock`：由 `uv` 產生的鎖定檔，用於固定相依套件版本。移到伺服器或其他電腦時，保留此檔可提高環境重建的一致性。
 - `.venv/`：本機 Python 虛擬環境。這是可重建資料夾，不建議納入版本控制；若搬移後不能執行，可重新跑 `UV_CACHE_DIR=work/uv-cache uv sync`。
@@ -302,13 +303,15 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 - `scripts/inspect_ocm_netcdf.py`：檢查單一 OCM/SCHISM NetCDF 檔案結構，輸出維度、變數、屬性、時間軸與主要欄位範圍。用途是在正式前處理前確認 `hvel`、`zcor`、`depth`、`time` 等資料是否符合腳本假設；其 JSON 輸出目前只作為人工檢查紀錄，不會被月前處理腳本自動讀取。
 - `scripts/preprocess_ocm_month.py`：月資料前處理主程式。它會直接讀取單月所有 `*_schout.nc` 日檔，選取台灣鄰近 bbox，優先使用原始 `SCHISM_hgrid_face_nodes` 元素連結把非結構網格節點資料插值到規則經緯度格點；若來源檔缺少 face connectivity，才退回 Delaunay 重心權重。選用 `--include-elev` 時會輸出 `elev.npy`，選用 `--land-geojson` 時會在靜態 mesh mask 之外再扣除 GeoJSON 陸域 polygon，輸出包含 `u/v/speed/elev/zcor_mean/bathymetry/mask` 等中間檔；目前不接受 inspect JSON 作為輸入。
 - `scripts/visualize_ocm_month.py`：月資料視覺化主程式。它讀取前處理輸出的 `.npy` 與 JSON metadata，產生可選中性底圖或 η/elev 水位底圖的表層流場 GIF、指定垂向層 GIF，以及含海底面參照的 3D 稀疏箭頭示意圖。
+- `scripts/run_ocm_2025_year.sh`：月份批次入口，實際 server 執行方式與環境變數範例請見 `README_SERVER.md`。
+- `scripts/summarize_ocm_year.py`：月份/年度摘要檢查工具。它讀取每個月的 `monthly_summary.json` 與 `.npy` header，輸出 JSON/CSV 摘要，檢查缺檔、shape、月份格點一致性與日檔缺日。
 - `scripts/__pycache__/`：Python 自動產生的 bytecode cache。這是可刪除、可重建資料夾，不影響專案邏輯。
 
 ### `outputs/`
 
 - `outputs/inspect_20250101.json`：`inspect_ocm_netcdf.py` 對 `20250101_schout.nc` 的檢查摘要。它用來記錄原始資料的維度、變數屬性、時間單位與抽樣後的數值範圍，方便人工確認前處理假設；目前不會被 `preprocess_ocm_month.py` 讀取或合併到月資料輸出。
 - `outputs/ocm_2025_01_smoke/`：小型 smoke test 輸出。通常只處理少量日檔、較疏時間步或較粗解析度，用於快速確認讀檔、插值與繪圖流程是否能跑通。
-- `outputs/ocm_2025_01_daily/`：一月份每日抽樣的主要 demo 輸出。此資料夾可作為後續整年批次處理的月資料格式範本。
+- `outputs/ocm_2025_01_daily/`：一月份每日抽樣的主要 demo 輸出。此資料夾可作為後續其它月份處理的月資料格式範本。
 - `outputs/ocm_2025_01_taiwan_10km_3h/`：台灣鄰近海域經度 `[119, 123]`、緯度 `[20, 27]` 的 10 km / 3 小時抽樣月資料輸出。這是目前較細解析度與較密時間抽樣的主要 demo 設定。
 
 ### 月資料輸出檔案

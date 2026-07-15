@@ -750,23 +750,40 @@ def build_mesh_interpolation_weights(path: Path, target_points: np.ndarray, grid
     element_indices = np.full(target_points.shape[0], -1, dtype=np.int64)
     valid = np.zeros(target_points.shape[0], dtype=bool)
 
-    for face_index, face in enumerate(faces):
-        face_nodes = face[face >= 0]
-        if face_nodes.size < 3:
-            continue
+    # 遠端正式資料每個日檔可接近百萬個 face。若逐一進入 Python 迴圈後才用
+    # grid_bbox_candidate_indices() 排除 bbox 外元素，會把絕大多數不可能命中台灣
+    # 研究區域的元素也做一次 Python 函式呼叫。這裡先用 NumPy 向量化計算每個 face
+    # 的 lon/lat bbox，保留和目標規則格點範圍相交的元素；後續迴圈只處理這些候選
+    # face，不改變插值語意，也不改變 wetdry_elem 的 element index 對應。
+    safe_faces = np.where(faces >= 0, faces, 0)
+    face_lon_min = np.min(np.where(faces >= 0, lon[safe_faces], np.inf), axis=1)
+    face_lon_max = np.max(np.where(faces >= 0, lon[safe_faces], -np.inf), axis=1)
+    face_lat_min = np.min(np.where(faces >= 0, lat[safe_faces], np.inf), axis=1)
+    face_lat_max = np.max(np.where(faces >= 0, lat[safe_faces], -np.inf), axis=1)
+    target_lon_min = float(lon_axis[0])
+    target_lon_max = float(lon_axis[-1])
+    target_lat_min = float(lat_axis[0])
+    target_lat_max = float(lat_axis[-1])
+    face_node_counts = (faces >= 0).sum(axis=1)
+    candidate_face_indices = np.flatnonzero(
+        (face_node_counts >= 3)
+        & (face_lon_max >= target_lon_min)
+        & (face_lon_min <= target_lon_max)
+        & (face_lat_max >= target_lat_min)
+        & (face_lat_min <= target_lat_max)
+    )
 
+    for face_index in candidate_face_indices:
+        face = faces[face_index]
+        face_nodes = face[face >= 0]
         polygon = np.column_stack([lon[face_nodes], lat[face_nodes]])
-        lon_min = float(np.nanmin(polygon[:, 0]))
-        lon_max = float(np.nanmax(polygon[:, 0]))
-        lat_min = float(np.nanmin(polygon[:, 1]))
-        lat_max = float(np.nanmax(polygon[:, 1]))
         candidate_indices = grid_bbox_candidate_indices(
             lon_axis,
             lat_axis,
-            lon_min,
-            lon_max,
-            lat_min,
-            lat_max,
+            float(face_lon_min[face_index]),
+            float(face_lon_max[face_index]),
+            float(face_lat_min[face_index]),
+            float(face_lat_max[face_index]),
             valid,
         )
         if candidate_indices.size == 0:
@@ -1146,8 +1163,10 @@ def process_month(
                         zcor_layers[layer, ~time_mask] = np.nan
                     if include_zcor_time:
                         zcor_frames.append(zcor_layers)
-        # 列印簡單進度資訊以利監控長時間運算
-        print(f"processed {file_index}/{len(files)}: {path.name}")
+        # 列印簡單進度資訊以利監控長時間運算。正式 server 批次會透過 nohup/tee
+        # 寫入 log；非互動管線預設可能緩衝 stdout，因此必須 flush，否則大檔案月份
+        # 可能要等整個 Python 程式結束才看得到 processed 訊息。
+        print(f"processed {file_index}/{len(files)}: {path.name}", flush=True)
 
     # 將 frame 列表堆疊為 (time, layer, lat, lon) 的陣列
     u = np.stack(u_frames, axis=0)
