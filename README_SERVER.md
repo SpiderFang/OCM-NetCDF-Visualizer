@@ -309,6 +309,57 @@ done
 可以調高到 `--fps 4` 或 `--fps 8`。`--frame-stride 1` 代表使用前處理輸出的每個時間步；
 若要快速檢查，可暫時改成 `--frame-stride 4` 降低繪圖時間。
 
+## 全年 2D GIF 串接
+
+若 2025 年 1 月到 12 月的同一種 2D GIF 都已畫好，可用
+`scripts/concat_ocm_year_gifs.py` 把每月 GIF 依月份順序接成全年 GIF。此步驟只讀取
+已完成的 `figures/*.gif`，不重跑 NetCDF 前處理，也不重畫每月影格。
+
+串接主要研究圖 `surface_speed_elev_anomaly_quiver.gif`：
+
+```bash
+cd /home/mustlab/Workspace/OCM-NetCDF-Visualizer
+
+UV_CACHE_DIR=work/uv-cache \
+uv run python3 scripts/concat_ocm_year_gifs.py \
+  --year 2025 \
+  --suffix taiwan_10km_3h \
+  --figure-name surface_speed_elev_anomaly_quiver.gif \
+  --fps 2
+```
+
+預設輸入為：
+
+```text
+outputs/ocm_2025_01_taiwan_10km_3h/figures/surface_speed_elev_anomaly_quiver.gif
+...
+outputs/ocm_2025_12_taiwan_10km_3h/figures/surface_speed_elev_anomaly_quiver.gif
+```
+
+輸出會寫到：
+
+```text
+outputs/ocm_2025_year_taiwan_10km_3h/figures/surface_speed_elev_anomaly_quiver.gif
+outputs/ocm_2025_year_taiwan_10km_3h/figures/surface_speed_elev_anomaly_quiver.manifest.json
+```
+
+若要串接原始水位檢查圖，只改 `--figure-name`：
+
+```bash
+cd /home/mustlab/Workspace/OCM-NetCDF-Visualizer
+
+UV_CACHE_DIR=work/uv-cache \
+uv run python3 scripts/concat_ocm_year_gifs.py \
+  --year 2025 \
+  --suffix taiwan_10km_3h \
+  --figure-name surface_speed_elev_quiver.gif \
+  --fps 2
+```
+
+若每月圖是 GeoJSON QC 版本，改用 `--suffix taiwan_10km_geojson_qc`。年度 GIF 的限制是
+保留每月原本的色階、標題與 `elev_anomaly` 月平均基準；若要全年統一色階或全年平均
+水位異常，需另外從 12 個月份的 `.npy` 中間檔重畫。
+
 ## 3D 靜態圖
 
 靜態 3D 示意圖會輸出 `flow_field_3d.png`。以下以 2025 年 2 月為例：
@@ -358,3 +409,5 @@ uv run python3 scripts/visualize_ocm_month.py \
 - `model_layer_016_horizontal_current_speed_quiver.gif`、`model_layer_032_horizontal_current_speed_quiver.gif`：指定中間層流場。
 - `flow_field_3d.png`：靜態 3D 稀疏箭頭示意圖。
 - `flow_field_3d_time_layers_032_040_047.gif`：近表層 3D 時間動畫。
+- `outputs/ocm_2025_year_taiwan_10km_3h/figures/*.gif`：由每月 GIF 串接而成的全年 GIF。
+- `outputs/ocm_2025_year_taiwan_10km_3h/figures/*.manifest.json`：全年 GIF 的來源月份、幀數、fps 與影格尺寸紀錄。

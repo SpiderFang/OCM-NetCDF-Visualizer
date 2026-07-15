@@ -199,7 +199,52 @@ uv run python3 scripts/visualize_ocm_month.py \
   --target-arrows 1000
 ```
 
-## 4. 選用：產生三維示意圖
+## 4. 串接全年 2D GIF
+
+若 12 個月份的同一種 2D GIF 都已完成，可用 `concat_ocm_year_gifs.py` 直接把每月
+GIF 依月份順序接成年度 GIF。此做法不重跑前處理、不重畫每月影格，適合先快速產生
+全年連續動畫：
+
+```bash
+UV_CACHE_DIR=work/uv-cache \
+  uv run python3 scripts/concat_ocm_year_gifs.py \
+  --year 2025 \
+  --suffix taiwan_10km_3h \
+  --figure-name surface_speed_elev_anomaly_quiver.gif \
+  --fps 2
+```
+
+預設會讀取：
+
+```text
+outputs/ocm_2025_01_taiwan_10km_3h/figures/surface_speed_elev_anomaly_quiver.gif
+...
+outputs/ocm_2025_12_taiwan_10km_3h/figures/surface_speed_elev_anomaly_quiver.gif
+```
+
+並輸出：
+
+```text
+outputs/ocm_2025_year_taiwan_10km_3h/figures/surface_speed_elev_anomaly_quiver.gif
+outputs/ocm_2025_year_taiwan_10km_3h/figures/surface_speed_elev_anomaly_quiver.manifest.json
+```
+
+若要串接其它 2D 圖，只改 `--figure-name`。例如原始水位檢查圖：
+
+```bash
+UV_CACHE_DIR=work/uv-cache \
+  uv run python3 scripts/concat_ocm_year_gifs.py \
+  --year 2025 \
+  --suffix taiwan_10km_3h \
+  --figure-name surface_speed_elev_quiver.gif \
+  --fps 2
+```
+
+此年度 GIF 是「每月 GIF 接起來」的快速成果。每個月份原本的色階、標題與
+`elev_anomaly` 月平均基準會維持各月設定；若需要全年統一色階或全年平均水位異常，
+應另外用 12 個月份的 `.npy` 中間檔重畫年度圖。
+
+## 5. 選用：產生三維示意圖
 
 若需要靜態 3D 示意圖，再額外執行以下指令。這一步會輸出 `flow_field_3d.png`；
 若只想快速驗證 2D 動畫，可先跳過。
@@ -303,6 +348,7 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 - `scripts/inspect_ocm_netcdf.py`：檢查單一 OCM/SCHISM NetCDF 檔案結構，輸出維度、變數、屬性、時間軸與主要欄位範圍。用途是在正式前處理前確認 `hvel`、`zcor`、`depth`、`time` 等資料是否符合腳本假設；其 JSON 輸出目前只作為人工檢查紀錄，不會被月前處理腳本自動讀取。
 - `scripts/preprocess_ocm_month.py`：月資料前處理主程式。它會直接讀取單月所有 `*_schout.nc` 日檔，選取台灣鄰近 bbox，優先使用原始 `SCHISM_hgrid_face_nodes` 元素連結把非結構網格節點資料插值到規則經緯度格點；若來源檔缺少 face connectivity，才退回 Delaunay 重心權重。選用 `--include-elev` 時會輸出 `elev.npy`，選用 `--land-geojson` 時會在靜態 mesh mask 之外再扣除 GeoJSON 陸域 polygon，輸出包含 `u/v/speed/elev/zcor_mean/bathymetry/mask` 等中間檔；目前不接受 inspect JSON 作為輸入。
 - `scripts/visualize_ocm_month.py`：月資料視覺化主程式。它讀取前處理輸出的 `.npy` 與 JSON metadata，產生可選中性底圖或 η/elev 水位底圖的表層流場 GIF、指定垂向層 GIF，以及含海底面參照的 3D 稀疏箭頭示意圖。
+- `scripts/concat_ocm_year_gifs.py`：年度 GIF 串接工具。它讀取已完成的每月 GIF，依月份順序輸出年度 GIF 與 manifest JSON；此工具不重畫影格，也不改變每月原本的色階或水位異常基準。
 - `scripts/run_ocm_2025_year.sh`：月份批次入口，實際 server 執行方式與環境變數範例請見 `README_SERVER.md`。
 - `scripts/summarize_ocm_year.py`：月份/年度摘要檢查工具。它讀取每個月的 `monthly_summary.json` 與 `.npy` header，輸出 JSON/CSV 摘要，檢查缺檔、shape、月份格點一致性與日檔缺日。
 - `scripts/__pycache__/`：Python 自動產生的 bytecode cache。這是可刪除、可重建資料夾，不影響專案邏輯。
@@ -341,6 +387,7 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 - `bottom_layer_000_horizontal_current_speed_quiver.gif`、`model_layer_016_horizontal_current_speed_quiver.gif`、`model_layer_032_horizontal_current_speed_quiver.gif`：指定垂向層的中性底圖加箭頭動畫，用於比較不同深度或模型層的流場差異。實際輸出層數由 `--layer-indices` 或 `--all-layers` 決定；圖中的淡灰色區域代表該 layer 沒有有效資料，不代表低流速。
 - `flow_field_3d.png`：3D 稀疏箭頭示意圖，使用 `zcor_mean.npy` 放置不同垂向層，並加上半透明海底面作為深度參照。
 - `flow_field_3d_time_layers_032_040_047.gif`：近表層 3D 時間動畫，使用 `zcor.npy` 放置每一幀的水面與模型層位；標題中的 `surface mean z` 是該幀表層平均水位，方便檢查水位逐時變化。
+- `outputs/ocm_2025_year_taiwan_10km_3h/figures/*.gif`：由 `concat_ocm_year_gifs.py` 將每月 GIF 串接後的年度 GIF。旁邊的 `*.manifest.json` 記錄來源月份、每月幀數、輸出 fps 與圖面尺寸。
 
 ### `work/`
 
