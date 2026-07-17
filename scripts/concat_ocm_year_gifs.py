@@ -25,6 +25,8 @@
   改成全年平均基準。
 - 所有輸入 GIF 的影格尺寸必須一致。若某個月份使用不同 bbox、解析度、DPI 或圖面
   版型，工具會停止並回報是哪個月份不一致，避免產生跳動或破版的全年動畫。
+- GIF 讀取器可能把不同影格解成 RGB 或 RGBA；工具會先把每張影格正規化為 RGB，
+  再檢查高寬是否一致，避免透明通道差異被誤判為圖面尺寸不同。
 """
 
 from __future__ import annotations
@@ -46,6 +48,11 @@ DEFAULT_FIGURE_NAME = "surface_speed_elev_anomaly_quiver.gif"
 
 # 預設月份順序為完整日曆年。若只想測試或串接部分月份，可用 --months 覆蓋。
 DEFAULT_MONTHS = tuple(range(1, 13))
+
+# GIF 透明影格合成背景。OCM 月份動畫本身是 Matplotlib 輸出的完整圖面，理論上不需要
+# 透明度；但 Pillow/imageio 讀取 GIF 時，少數影格可能以 RGBA 回傳。將透明區合成到
+# 白色背景，可保留圖面、標題與 colorbar 在常見文件/瀏覽器背景上的判讀一致性。
+ALPHA_BACKGROUND_RGB = (255, 255, 255)
 
 
 @dataclass(frozen=True)
@@ -232,14 +239,89 @@ def iter_gif_frames(path: Path) -> Iterable[np.ndarray]:
 
     使用 generator 是為了避免一次把整個月份 GIF 讀進記憶體。年度動畫可能包含數千幀，
     因此每次只取出一張影格、檢查尺寸、寫入年度 GIF，是比較穩定的 server 工作模式。
+    每張影格會先轉成 RGB `uint8`，因為同一個 GIF 中可能同時出現 RGB 與 RGBA 影格；
+    這種差異來自 GIF palette/透明度解碼，不代表實際圖面高寬不同。
     """
 
     reader = imageio.get_reader(path)
     try:
         for frame in reader:
-            yield np.asarray(frame)
+            yield normalize_frame_to_rgb(np.asarray(frame))
     finally:
         reader.close()
+
+
+def to_uint8_image(array: np.ndarray) -> np.ndarray:
+    """將影像陣列轉成 `uint8`。
+
+    `imageio` 讀取 GIF 時通常會回傳 `uint8`，但測試資料或未來其它影像格式可能使用
+    float 或較大的整數 dtype。年度 GIF writer 需要穩定的 8-bit 影像；這裡只做影像
+    編碼層級的型別轉換，不改變 OCM 流場資料，也不對色階重新正規化。
+    """
+
+    if array.dtype == np.uint8:
+        return np.ascontiguousarray(array)
+    if np.issubdtype(array.dtype, np.floating):
+        finite_max = float(np.nanmax(array)) if np.size(array) else 1.0
+        scale = 255.0 if finite_max <= 1.0 else 1.0
+        return np.clip(np.nan_to_num(array) * scale, 0, 255).astype(np.uint8)
+    return np.clip(array, 0, 255).astype(np.uint8)
+
+
+def alpha_to_unit_interval(alpha: np.ndarray) -> np.ndarray:
+    """將 alpha channel 轉成 0 到 1 的透明度權重。
+
+    GIF/Pillow 常見 alpha dtype 是 `uint8`，範圍 0 到 255；若未來讀到 float alpha，
+    則同時支援 0 到 1 或 0 到 255 兩種慣例。輸出形狀保持 `(height, width, 1)`，
+    方便與 RGB 三通道做 broadcast 合成。
+    """
+
+    if np.issubdtype(alpha.dtype, np.floating):
+        finite_max = float(np.nanmax(alpha)) if np.size(alpha) else 1.0
+        denominator = 1.0 if finite_max <= 1.0 else 255.0
+    elif np.issubdtype(alpha.dtype, np.integer):
+        denominator = float(np.iinfo(alpha.dtype).max)
+    else:
+        denominator = 255.0
+    return np.clip(np.nan_to_num(alpha.astype(np.float32) / denominator), 0.0, 1.0)
+
+
+def normalize_frame_to_rgb(frame: np.ndarray) -> np.ndarray:
+    """把 GIF 影格統一成 `(height, width, 3)` 的 RGB `uint8` 陣列。
+
+    這是年度串接的關鍵防呆：同一個 GIF 內可能有些影格讀成 RGB、有些影格讀成 RGBA。
+    RGBA 只多了一個透明通道，並不表示圖面版型真的改變；若直接比較完整 shape，
+    就會出現 `(980, 1190, 3)` 與 `(980, 1190, 4)` 這類誤判。此函式會把 RGBA 影格
+    先合成到白底，再回傳 RGB，讓後續尺寸檢查聚焦在高寬是否一致。
+    """
+
+    if frame.ndim == 2:
+        # 灰階影格沒有 channel 維度；重複成 RGB，讓 writer 與 manifest 格式一致。
+        gray = to_uint8_image(frame)
+        return np.ascontiguousarray(np.repeat(gray[:, :, np.newaxis], 3, axis=2))
+
+    if frame.ndim != 3:
+        raise ValueError(f"不支援的 GIF 影格維度：{frame.shape}")
+
+    channel_count = frame.shape[2]
+    if channel_count == 1:
+        gray = to_uint8_image(frame[:, :, 0])
+        return np.ascontiguousarray(np.repeat(gray[:, :, np.newaxis], 3, axis=2))
+
+    if channel_count == 3:
+        return to_uint8_image(frame[:, :, :3])
+
+    if channel_count == 4:
+        rgb = to_uint8_image(frame[:, :, :3]).astype(np.float32)
+        alpha = alpha_to_unit_interval(frame[:, :, 3:4])
+        background = np.array(ALPHA_BACKGROUND_RGB, dtype=np.float32).reshape(1, 1, 3)
+        composed = rgb * alpha + background * (1.0 - alpha)
+        return np.clip(np.rint(composed), 0, 255).astype(np.uint8)
+
+    raise ValueError(
+        "不支援的 GIF 影格 channel 數；年度串接只接受灰階、RGB 或 RGBA。\n"
+        f"影格尺寸：{frame.shape}"
+    )
 
 
 def append_month_to_writer(

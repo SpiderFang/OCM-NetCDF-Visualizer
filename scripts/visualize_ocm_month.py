@@ -2,7 +2,8 @@
 
 本腳本讀取 preprocess_ocm_month.py 輸出的規則格點陣列。二維動畫可採用中性
 海域底圖，或使用 η/elev 自由水面高度作為底圖色階，再加 quiver 箭頭以箭頭長度
-直接表示水平流速大小；三維靜態示意圖採用月平均 zcor 作為垂向位置；若
+直接表示水平流速大小，並在圖面加入 m/s 參考箭頭比例尺；三維靜態示意圖採用
+月平均 zcor 作為垂向位置；若
 前處理另外輸出 `zcor.npy`，三維時間動畫會使用逐時 zcor 呈現水位與層位變動，目的是
 先期觀察台灣周遭流場與可能的分割區域，而不是取代 ParaView/pyParaOcean
 等高階互動式三維分析工具。
@@ -10,8 +11,8 @@
 說明:
 - 讀取由 `preprocess_ocm_month.py` 所輸出的 NumPy 中間檔 (npy + JSON)
 - 產生二維底圖並繪製箭頭 (quiver)：底圖可選中性海域色或 η/elev 水位色階，
-    箭頭方向表示流向、箭頭長度表示流速大小；或輸出一張三維示意圖，使用月平均 `zcor_mean`
-    作為垂向位置來表示層化結構。
+    箭頭方向表示流向、箭頭長度表示流速大小，右下角 quiverkey 標示參考流速；
+    或輸出一張三維示意圖，使用月平均 `zcor_mean` 作為垂向位置來表示層化結構。
 
 註記:
 - 此腳本的目的在於快速視覺化與資料檢查，而非替代互動式三維分析軟體。
@@ -29,6 +30,7 @@ import imageio.v2 as imageio
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -48,6 +50,17 @@ LAND_EDGE_COLOR = "#555555"
 OCEAN_COLOR = "#e7f2f3"
 # 二維箭頭顏色：在中性海域、淡灰缺值與淺色陸地上都要保持足夠對比。
 QUIVER_COLOR = "#123b5d"
+# 2D 流速箭頭比例尺位置，使用 axes fraction 而非經緯度資料座標。這讓比例尺在
+# 不同 bbox、不同經緯度範圍或有無 η colorbar 的圖面中都保持固定視覺位置；
+# labelpos="E" 會讓文字出現在參考箭頭右側，避免遮住箭頭本身。
+QUIVER_KEY_X = 0.78
+QUIVER_KEY_Y = 0.055
+# 比例尺底框使用 axes fraction，寬度刻意涵蓋參考箭頭與文字。這個底框不是資料
+# 圖層，只是避免深藍色參考箭頭被附近的流場箭頭或 η 底圖干擾。
+QUIVER_KEY_BOX_X = 0.64
+QUIVER_KEY_BOX_Y = 0.022
+QUIVER_KEY_BOX_WIDTH = 0.30
+QUIVER_KEY_BOX_HEIGHT = 0.07
 # 2D 底圖模式：neutral 保留舊版固定海色，elev 使用原始 `elev` 插值後的
 # η（自由水面高度），elev_anomaly 則先扣除每個格點月平均水位，用於凸顯潮汐
 # 或短期水位振盪。這些模式只改變底圖標量，不改變 quiver 的流速來源。
@@ -171,6 +184,75 @@ def choose_quiver_step(lon_count: int, lat_count: int, target_arrows: int) -> tu
     step = max(1, int(np.sqrt(total / max(target_arrows, 1))))
     # 回傳 (y_step, x_step)；目前採用方形抽樣間距以維持視覺平均性
     return step, step
+
+
+def choose_quiver_reference_speed(vmax: float) -> float:
+    """依箭頭縮放基準挑選圖面比例尺的參考流速。
+
+    `vmax` 來自同一段 2D 動畫有效海域速度的 98 百分位，單位為 m/s；它不是
+    colorbar 上限，而是所有影格共用的 quiver 縮放基準。比例尺若直接標 `vmax`
+    常會太長且容易和資料箭頭混在一起，因此此函式以 `0.5 * vmax` 為目標，換算
+    成 1/2/5 × 10^n 的易讀數值。輸出仍是 m/s，會交給 Matplotlib quiverkey
+    使用同一個 quiver 物件繪製，確保比例尺長度和主圖箭頭的縮放規則一致。
+    """
+
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        return 1.0
+    target = max(float(vmax) * 0.5, float(np.finfo(np.float32).tiny))
+    exponent = float(np.floor(np.log10(target)))
+    magnitude = 10.0**exponent
+    normalized = target / magnitude
+    if normalized <= 1.0:
+        nice = 1.0
+    elif normalized <= 2.0:
+        nice = 2.0
+    elif normalized <= 5.0:
+        nice = 5.0
+    else:
+        nice = 10.0
+    return float(nice * magnitude)
+
+
+def add_quiver_scale_key(ax: plt.Axes, quiver: matplotlib.quiver.Quiver, vmax: float) -> None:
+    """在 2D 流場圖上加入流速箭頭比例尺。
+
+    quiverkey 的 `U` 必須使用和 u/v 分量相同的物理單位，這裡即 m/s。由於主圖
+    已用整段動畫的 `vmax` 固定 quiver scale，比例尺也根據同一個 `vmax` 選值；
+    讀者即可把圖中任一箭頭長度與這支參考箭頭比較，判讀實際流速量級。比例尺
+    放在 axes 內部右下角，原因是 GIF frame 會經過 tight_layout 與 imageio 合成，
+    放在圖外較容易被裁切或和 η colorbar 互相擠壓。
+    """
+
+    reference_speed = choose_quiver_reference_speed(vmax)
+    # 先畫淡色底框，再疊 quiverkey。底框座標使用 ax.transAxes，因此不會隨 bbox
+    # 經緯度範圍改變；clip_on=False 可避免 tight_layout 後邊緣被裁掉。
+    ax.add_patch(
+        mpatches.Rectangle(
+            (QUIVER_KEY_BOX_X, QUIVER_KEY_BOX_Y),
+            QUIVER_KEY_BOX_WIDTH,
+            QUIVER_KEY_BOX_HEIGHT,
+            transform=ax.transAxes,
+            facecolor="#f8fbfc",
+            edgecolor=QUIVER_COLOR,
+            linewidth=0.45,
+            alpha=0.86,
+            zorder=5,
+            clip_on=False,
+        )
+    )
+    ax.quiverkey(
+        quiver,
+        X=QUIVER_KEY_X,
+        Y=QUIVER_KEY_Y,
+        U=reference_speed,
+        label=f"{reference_speed:g} m/s",
+        labelpos="E",
+        coordinates="axes",
+        color=QUIVER_COLOR,
+        labelcolor=QUIVER_COLOR,
+        fontproperties={"size": 8, "weight": "bold"},
+        zorder=6,
+    )
 
 
 def normalize_ocean_mask(mask: np.ndarray, expected_shape: tuple[int, int]) -> np.ndarray:
@@ -404,20 +486,22 @@ def frame_to_png(
     sampled_valid_vector = valid_vector[::sy, ::sx]
     sampled_u = np.ma.masked_where(~sampled_valid_vector, u[::sy, ::sx])
     sampled_v = np.ma.masked_where(~sampled_valid_vector, v[::sy, ::sx])
-    ax.quiver(
+    quiver = ax.quiver(
         q_lon,
         q_lat,
         sampled_u,
         sampled_v,
         color=QUIVER_COLOR,
         # scale 參數影響箭頭長度；以整段動畫的速度百分位作為基準，代表相同速度
-        # 在每一幀都有相同視覺長度。係數比舊版小，讓使用者能直接從箭頭長度判讀流速強弱。
+        # 在每一幀都有相同視覺長度。右下角 quiverkey 會沿用同一個 quiver 物件，
+        # 讓讀者能把箭頭長度和 m/s 參考箭頭直接比較。
         scale=max(vmax * 8, 0.1),
         width=0.0026,
         headwidth=3.5,
         headlength=4.5,
         alpha=0.9,
     )
+    add_quiver_scale_key(ax, quiver, vmax)
 
     # 標題與座標標籤。水位異常與原始水位雖然都來自 elev，但學術判讀語意不同；
     # 因此標題也分開標示，避免單看 GIF 時把 η' 誤解為未扣平均的 η。

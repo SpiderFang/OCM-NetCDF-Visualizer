@@ -359,6 +359,8 @@ uv run python3 scripts/concat_ocm_year_gifs.py \
 若每月圖是 GeoJSON QC 版本，改用 `--suffix taiwan_10km_geojson_qc`。年度 GIF 的限制是
 保留每月原本的色階、標題與 `elev_anomaly` 月平均基準；若要全年統一色階或全年平均
 水位異常，需另外從 12 個月份的 `.npy` 中間檔重畫。
+若某個月 GIF 讀取時同時出現 RGB 與 RGBA 影格，串接工具會先把影格合成為 RGB，
+再檢查高寬是否一致；這可避免透明 channel 差異造成誤判，不需要為此重畫月份圖。
 
 ## 3D 靜態圖
 
@@ -402,12 +404,22 @@ uv run python3 scripts/visualize_ocm_month.py \
 
 ## 常用輸出檔
 
-- `surface_speed_elev_anomaly_quiver.gif`：表層流速搭配月平均水位異常。
-- `surface_speed_elev_quiver.gif`：表層流速搭配原始 `η/elev` 水位。
-- `surface_layer_047_horizontal_current_speed_quiver.gif`：表層中性底圖流場。
-- `bottom_layer_000_horizontal_current_speed_quiver.gif`：底層中性底圖流場。
-- `model_layer_016_horizontal_current_speed_quiver.gif`、`model_layer_032_horizontal_current_speed_quiver.gif`：指定中間層流場。
+- `surface_speed_elev_anomaly_quiver.gif`：表層流速搭配月平均水位異常，圖面含 m/s 流速箭頭比例尺。
+- `surface_speed_elev_quiver.gif`：表層流速搭配原始 `η/elev` 水位，圖面含 m/s 流速箭頭比例尺。
+- `surface_layer_047_horizontal_current_speed_quiver.gif`：表層中性底圖流場，圖面含 m/s 流速箭頭比例尺。
+- `bottom_layer_000_horizontal_current_speed_quiver.gif`：底層中性底圖流場，圖面含 m/s 流速箭頭比例尺。
+- `model_layer_016_horizontal_current_speed_quiver.gif`、`model_layer_032_horizontal_current_speed_quiver.gif`：指定中間層流場，圖面含 m/s 流速箭頭比例尺。
 - `flow_field_3d.png`：靜態 3D 稀疏箭頭示意圖。
 - `flow_field_3d_time_layers_032_040_047.gif`：近表層 3D 時間動畫。
 - `outputs/ocm_2025_year_taiwan_10km_3h/figures/*.gif`：由每月 GIF 串接而成的全年 GIF。
 - `outputs/ocm_2025_year_taiwan_10km_3h/figures/*.manifest.json`：全年 GIF 的來源月份、幀數、fps 與影格尺寸紀錄。
+
+## 流速箭頭比例尺備註
+
+2D quiver 圖的箭頭比例尺以同一段動畫、同一個 layer 的有效海域流速第 98 百分位作為
+縮放基準 `vmax`。第 98 百分位代表約 98% 的有效流速不超過此值，可視為代表性高流速；
+不用最大值是為了避免少數局部強流、邊界插值尖峰或資料雜訊把大多數箭頭壓得過短。
+圖面右下角的 m/s 參考箭頭由同一個 `quiver` 物件的 `quiverkey` 產生，因此和主圖箭頭
+使用相同縮放規則。參考箭頭標示值由 `0.5 * vmax` 轉成易讀的 `1/2/5 × 10^n` 刻度。
+目前一月台灣 10 km / 3 小時表層檢查圖的例子為 `vmax_98pct=1.22541 m/s`，因此圖面
+標示 `1 m/s` 參考箭頭。
