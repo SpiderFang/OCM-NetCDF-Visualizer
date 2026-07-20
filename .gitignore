@@ -20,3 +20,5 @@ outputs/*
 # 外部 GeoJSON/TopoJSON 岸線或行政區圖資由 README 的下載指令重建。
 # 這些檔案可能很大，且版本應由執行紀錄與 monthly_summary.json 追蹤，不直接提交。
 data/geojson/
+# 計畫書中五個研究區域的參考圖資。
+data/reference/

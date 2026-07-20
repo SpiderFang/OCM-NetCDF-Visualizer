@@ -9,9 +9,25 @@
 - 產出月資料中間檔，作為年度動畫、三維示意圖與後續研究區域分割的共同輸入。
 - 產出表層流場動畫、固定垂向層動畫與三維流場示意圖。
 
+## 研究區參考圖
+
+五個研究區的原始範圍、等深線與作業海域參考圖統一存放於 `data/reference/`，
+避免文件依賴個人電腦的 `Downloads` 絕對路徑。這些圖片只用於 bbox 判讀、視覺比對與報告追溯，
+不是前處理腳本的輸入，也不代表 OCM 網格解析度或模式計算邊界。
+
+- `data/reference/屏東縣國立海洋生物博物館周邊海域.png`
+- `data/reference/宜蘭縣龜山島海域.png`
+- `data/reference/新北市貢寮海域.png`
+- `data/reference/新竹縣外海.png`
+- `data/reference/連江縣海域.png`
+
+各區正式 bbox、檢視成果與邊界決策理由記錄於
+[`docs/REGION_BBOX_RECORD.md`](docs/REGION_BBOX_RECORD.md)。
+
 ## 後續實作規格
 
 - `docs/NEXT_PHASE_ENHANCED_SPEC.md`：記錄下一階段加強版實作規格，包含 `dahv` 深度平均流場、`elev` 水位疊圖、`vertical_velocity` 垂直流速、溫鹽密度特徵、乾濕遮罩、年度批次處理與驗收標準。後續開發新欄位或新動畫前，應先依此 spec 拆分任務與更新 README。
+- `docs/VECTOR_LAND_OVERLAY.md`：記錄成果圖使用的「1 km OCM 規則格點資料 + GeoJSON 向量陸地疊圖」做法。此做法只提升陸地、離島與海岸線的視覺辨識度，不改變流場資料解析度或統計結果；後續成果報告若需要讓北竿、南竿、龜山島、貢寮岬角等小尺度陸地更清楚，應先參考此文件。
 
 ## 選用外部 GeoJSON 陸域遮罩
 
