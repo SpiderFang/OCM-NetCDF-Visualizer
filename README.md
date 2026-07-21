@@ -216,6 +216,44 @@ uv run python3 scripts/visualize_ocm_month.py \
   --target-arrows 1000
 ```
 
+### 投影片用乾淨區域圖
+
+若只需要後續簡報排版用的乾淨 PNG，使用獨立腳本
+`scripts/plot_ocm_clean_region_maps.py`，不要改動一般動畫腳本
+`scripts/visualize_ocm_month.py`。此腳本會讀取既有 `.npy` 中間檔，輸出：
+
+- 四個等物理尺寸 flow-domain bbox 主圖：連江共用域、東北台灣共用域、新竹單區域、屏東/海生館單區域。
+- 三張獨立放大圖：龜山島、貢寮、南北竿。
+- 一份 JSON metadata，記錄時間、layer、bbox、zoom extent 與箭頭縮放參數。
+
+PNG 圖面刻意只保留經緯度刻度數字與 `Longitude`、`Latitude`；不放標題、圖例、
+比例尺文字、區域名稱或註解。流速箭頭使用同一個 98 百分位流速作為縮放基準，
+但預設 `--quiver-scale-multiplier 20`，因此箭頭比一般動畫更短、更細。三張獨立
+放大圖只顯示 GeoJSON 向量陸地輪廓；`mask.npy` 仍用於排除陸地箭頭，但不再把
+1 km 方格陸地畫出來，避免小島岸線外側出現階梯狀灰塊。
+
+目前 1 km GeoJSON QC 第一幀可用以下指令重畫：
+
+```bash
+UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
+  uv run python3 scripts/plot_ocm_clean_region_maps.py \
+  --input-dir outputs/ocm_2025_01_taiwan_1km_geojson_qc \
+  --output-dir outputs/ocm_2025_01_taiwan_1km_geojson_qc/figures \
+  --land-geojson data/geojson/twCounty2010.geo.json \
+  --layer-index -1 \
+  --time-index 0
+```
+
+主要輸出檔名：
+
+```text
+surface_layer_047_first_frame_four_region_equal_bbox_clean.png
+surface_layer_047_first_frame_guishan_zoom_clean.png
+surface_layer_047_first_frame_gongliao_zoom_clean.png
+surface_layer_047_first_frame_lienchiang_nangan_beigan_zoom_clean.png
+surface_layer_047_first_frame_four_region_equal_bbox_clean.json
+```
+
 ## 4. 串接全年 2D GIF
 
 若 12 個月份的同一種 2D GIF 都已完成，可用 `concat_ocm_year_gifs.py` 直接把每月
@@ -393,6 +431,7 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 - `scripts/inspect_ocm_netcdf.py`：檢查單一 OCM/SCHISM NetCDF 檔案結構，輸出維度、變數、屬性、時間軸與主要欄位範圍。用途是在正式前處理前確認 `hvel`、`zcor`、`depth`、`time` 等資料是否符合腳本假設；其 JSON 輸出目前只作為人工檢查紀錄，不會被月前處理腳本自動讀取。
 - `scripts/preprocess_ocm_month.py`：月資料前處理主程式。它會直接讀取單月所有 `*_schout.nc` 日檔，選取台灣鄰近 bbox，優先使用原始 `SCHISM_hgrid_face_nodes` 元素連結把非結構網格節點資料插值到規則經緯度格點；若來源檔缺少 face connectivity，才退回 Delaunay 重心權重。選用 `--include-elev` 時會輸出 `elev.npy`，選用 `--land-geojson` 時會在靜態 mesh mask 之外再扣除 GeoJSON 陸域 polygon，輸出包含 `u/v/speed/elev/zcor_mean/bathymetry/mask` 等中間檔；目前不接受 inspect JSON 作為輸入。
 - `scripts/visualize_ocm_month.py`：月資料視覺化主程式。它讀取前處理輸出的 `.npy` 與 JSON metadata，產生可選中性底圖或 η/elev 水位底圖的表層流場 GIF、指定垂向層 GIF，以及含海底面參照的 3D 稀疏箭頭示意圖。
+- `scripts/plot_ocm_clean_region_maps.py`：投影片後製用乾淨區域圖腳本。它讀取既有月資料 `.npy`，輸出只含經緯度刻度與 `Longitude`/`Latitude` 的 PNG：四個等物理尺寸 flow-domain bbox 主圖，以及龜山島、貢寮、南北竿三張獨立放大圖。此腳本不取代一般動畫流程，也不修改 `visualize_ocm_month.py` 的標題、圖例或比例尺設計。
 - `scripts/concat_ocm_year_gifs.py`：年度 GIF 串接工具。它讀取已完成的每月 GIF，依月份順序輸出年度 GIF 與 manifest JSON；此工具不重畫影格，也不改變每月原本的色階或水位異常基準。
 - `scripts/run_ocm_2025_year.sh`：月份批次入口，實際 server 執行方式與環境變數範例請見 `README_SERVER.md`。
 - `scripts/summarize_ocm_year.py`：月份/年度摘要檢查工具。它讀取每個月的 `monthly_summary.json` 與 `.npy` header，輸出 JSON/CSV 摘要，檢查缺檔、shape、月份格點一致性與日檔缺日。

@@ -95,17 +95,22 @@ for ring in land_outer_rings:
 
 兩者可以同時使用。前處理遮罩確保資料不在陸地上被判讀；向量疊圖確保報告圖面上的陸地看起來不像粗格點方塊。
 
-## Inset 放大框
+## 獨立放大圖
 
 即使用向量多邊形，北竿、南竿、龜山島這類小島在 `[119, 123] x [20, 27]` 全域圖上仍可能太小。
-此時建議加入局部放大框：
+若投影片需要後續另行排版，建議不要把放大框嵌在主圖內，而是使用
+`scripts/plot_ocm_clean_region_maps.py` 產生獨立 PNG：
 
 - 南竿 / 北竿放大：用於確認連江縣小島輪廓。
 - 龜山島放大：用於確認宜蘭外海小島輪廓。
 - 貢寮海域放大：用於確認東北角岬角、沿岸與貢寮區域框位置。
 
-放大框應放在不遮擋主要標籤、圖例、比例尺與研究區域的海面位置。若放大框無法避免遮擋，優先移動描述標籤；
-若仍衝突，再調整放大框尺寸或位置。成果圖完成前應目視檢查所有文字框、圖例、比例尺、區域框與 inset 是否互相遮擋。
+此腳本的輸出圖只保留經緯度刻度數字與 `Longitude`、`Latitude`，不包含標題、圖例、
+比例尺文字、區域名稱或註解，因此可直接放進簡報再另行加字。主圖則使用四個等物理
+尺寸 flow-domain bbox：連江共用域、東北台灣共用域、新竹單區域與屏東/海生館單區域。
+三張獨立放大圖採用 `vector_land_only` 視覺模式：`mask.npy` 仍用於排除陸地流速
+箭頭，但不把 1 km mask 方格畫成陸地；可避免小島或岬角周圍出現階梯狀灰塊，
+讓 GeoJSON 向量岸線成為唯一可見陸地輪廓。
 
 ## 報告使用建議
 
@@ -128,16 +133,22 @@ for ring in land_outer_rings:
 - GeoJSON 邊界若年代、來源或精度不足，圖面陸地輪廓也會受限；正式報告應確認採用圖資來源。
 - 若圖面 bbox 很大，直接繪製全部 GeoJSON polygon 可能較慢；應先用 ring bbox 篩選是否與圖面範圍相交。
 - 若未來改用互動式地圖或非 lon/lat 投影，必須重新檢查投影轉換與座標軸語意。
-- 若將此功能正式整合進 `visualize_ocm_month.py`，建議新增 CLI 參數，例如：
+- 投影片乾淨版圖已獨立在 `scripts/plot_ocm_clean_region_maps.py`，避免改動
+  `visualize_ocm_month.py` 既有動畫的標題、圖例、比例尺與 QC 設計。重跑範例：
 
 ```bash
---land-overlay-geojson data/geojson/twCounty2010.geo.json
---land-overlay-insets gongliao,guishan,lienchiang
+UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
+  uv run python3 scripts/plot_ocm_clean_region_maps.py \
+  --input-dir outputs/ocm_2025_01_taiwan_1km_geojson_qc \
+  --output-dir outputs/ocm_2025_01_taiwan_1km_geojson_qc/figures \
+  --land-geojson data/geojson/twCounty2010.geo.json \
+  --layer-index -1 \
+  --time-index 0
 ```
 
-整合時需在 `monthly_summary.json` 或圖面 sidecar JSON 中記錄：
+此腳本輸出的 sidecar JSON 需記錄：
 
 - 陸域向量資料路徑。
 - 圖資來源與版本。
 - 是否只作視覺疊圖。
-- 每個 inset 的經緯度範圍與目的。
+- 四個 flow-domain bbox、每張獨立放大圖的經緯度範圍與箭頭縮放參數。

@@ -1,0 +1,29 @@
+flowchart TD
+  A[Start parse_args] --> B[load_month]
+  B --> C{Options}
+  C -->|surface-elev-anomaly| D[make_surface_elevation_animation: elev_anomaly]
+  C -->|surface-elev-animation| E[make_surface_elevation_animation: elev]
+  C -->|surface-animation| F[make_layer_animation: surface]
+  C -->|layer-animation| G[make_multiple_layer_animations]
+  C -->|make-3d| H[make_3d_static_zcor_mean]
+  C -->|make-3d-animation| I[make_3d_time_animation_requires_zcor]
+  subgraph make_layer_animation
+    M1[normalize_ocean_mask] --> M2[build_background_frames]
+    M2 --> M3[compute vmax 98pct]
+    M3 --> M4[choose_quiver_step]
+    M4 --> M5[loop time frames; frame_to_png; save PNG]
+    M5 --> M6[imageio combine PNGs to GIF]
+    M6 --> M7[cleanup temps]
+  end
+  subgraph frame_to_png
+    F1[apply_ocean_mask speed u v] --> F2[draw background]
+    F2 --> F3[draw_land_overlay]
+    F3 --> F4[sample and plot quiver]
+    F4 --> F5[add_quiver_scale_key + title + save PNG]
+  end
+  subgraph make_3d_time_animation
+    T1[require zcor] --> T2[select frames and layers]
+    T2 --> T3[loop time; build 3D figure; save PNG]
+    T3 --> T4[imageio combine PNGs to GIF]
+  end
+  D & E & F & G & H & I --> Z[End]

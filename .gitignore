@@ -22,3 +22,5 @@ outputs/*
 data/geojson/
 # 計畫書中五個研究區域的參考圖資。
 data/reference/
+# 研究區域 region bbox 圖資。
+data/region_bbox/
