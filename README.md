@@ -254,6 +254,29 @@ surface_layer_047_first_frame_lienchiang_nangan_beigan_zoom_clean.png
 surface_layer_047_first_frame_four_region_equal_bbox_clean.json
 ```
 
+若圖面要直接用於正式報告，且需要消除小島或岬角陸地上仍可見流場箭頭的視覺疑慮，
+使用報告安全版腳本 `scripts/plot_ocm_report_safe_region_maps.py`。此腳本保留舊
+乾淨圖流程與既有 `.npy` 中間檔，不回寫 `mask.npy`；它會在繪圖階段用指定岸線
+GeoJSON 重新建立 cell-overlap 報告視覺遮罩，排除落在陸地 cell 的箭頭 anchor，
+並在箭頭上方再覆蓋向量陸地 polygon，避免箭頭線段因長度伸進南北竿、龜山島或
+貢寮岬角等陸域。
+
+報告安全版第一幀範例：
+
+```bash
+UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
+  uv run python3 scripts/plot_ocm_report_safe_region_maps.py \
+  --input-dir outputs/ocm_2025_01_taiwan_1km_geojson_qc \
+  --output-dir outputs/ocm_2025_01_taiwan_1km_geojson_qc/figures_report_safe_exact_coastline \
+  --land-geojson data/geojson/taiwan_exact_coastline.geojson \
+  --layer-index -1 \
+  --time-index 0
+```
+
+報告安全版輸出檔名會使用 `_report_safe` 後綴，避免覆蓋舊版 `_clean` 成果；
+sidecar JSON 會記錄使用的岸線 GeoJSON、額外移除的報告遮罩格點數、每張圖的
+有效箭頭數，以及「原始 `mask.npy` 未被修改」的語意。
+
 ## 4. 串接全年 2D GIF
 
 若 12 個月份的同一種 2D GIF 都已完成，可用 `concat_ocm_year_gifs.py` 直接把每月
