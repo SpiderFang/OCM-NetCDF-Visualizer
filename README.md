@@ -233,7 +233,13 @@ PNG 圖面刻意只保留經緯度刻度數字與 `Longitude`、`Latitude`；不
 1 km 方格陸地畫出來，避免小島岸線外側出現階梯狀灰塊。所有主圖與放大圖都會
 強制把圖面經緯度左右/上下邊界加入座標軸主要刻度；這個設計是為了讓報告截圖能
 直接讀出裁切範圍，不會因 Matplotlib 自動刻度省略 bbox 上下限而被誤認為邊界
-沒有切齊。
+沒有切齊。三張獨立放大圖預設使用 `--zoom-coordinate-tick-interval 0.1`，讓龜山、
+貢寮與南北竿的經緯度主要刻度維持相同尺度。放大圖顯示範圍也採一位小數邊界：
+龜山 `121.80-122.20E, 24.60-25.00N`、貢寮 `121.70-122.20E, 24.80-25.30N`、
+南北竿 `119.80-120.20E, 26.00-26.40N`。這些是報告圖的 display extent，
+不是分析用 bbox；龜山與南北竿都採四個 0.1 度格距，避免 3 格圖面顯得偏小，
+貢寮則維持可完整涵蓋岬角與龜山島的 0.5 度 display extent。放大圖預設
+`--zoom-target-arrows 300`，保留足夠箭頭密度呈現局地流向。
 
 目前 1 km GeoJSON QC 第一幀可用以下指令重畫：
 
@@ -244,7 +250,8 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
   --output-dir outputs/ocm_2025_01_taiwan_1km_geojson_qc/figures \
   --land-geojson data/geojson/twCounty2010.geo.json \
   --layer-index -1 \
-  --time-index 0
+  --time-index 0 \
+  --zoom-coordinate-tick-interval 0.1
 ```
 
 主要輸出檔名：
@@ -271,9 +278,10 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
   uv run python3 scripts/plot_ocm_report_safe_region_maps.py \
   --input-dir outputs/ocm_2025_01_taiwan_1km_geojson_qc \
   --output-dir outputs/ocm_2025_01_taiwan_1km_geojson_qc/figures_report_safe_exact_coastline \
-  --land-geojson data/geojson/taiwan_exact_coastline.geojson \
+  --land-geojson data/coastline/taiwan_exact_coastline.geojson \
   --layer-index -1 \
-  --time-index 0
+  --time-index 0 \
+  --zoom-coordinate-tick-interval 0.1
 ```
 
 報告安全版輸出檔名會使用 `_report_safe` 後綴，避免覆蓋舊版 `_clean` 成果；

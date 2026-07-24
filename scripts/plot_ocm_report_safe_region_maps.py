@@ -36,6 +36,7 @@ import numpy as np
 from plot_ocm_clean_region_maps import (
     FLOW_DOMAIN_BBOXES,
     ZOOM_WINDOWS,
+    ZOOM_COORDINATE_TICK_INTERVAL_DEG,
     apply_boundary_coordinate_ticks,
     draw_region_boxes,
     draw_vector_land_overlay,
@@ -127,6 +128,7 @@ def draw_report_safe_current_map(
     dpi: int,
     vmax: float,
     draw_mask_land: bool,
+    coordinate_tick_interval: float | None,
 ) -> dict:
     """繪製單張報告安全乾淨圖。
 
@@ -137,9 +139,11 @@ def draw_report_safe_current_map(
        同時避免同一條岸線被前後重複描邊。
 
     圖面仍維持乾淨圖規則：不加標題、legend、quiverkey、區域名稱或說明文字，
-    只保留座標軸刻度與 `Longitude`、`Latitude`。`region_bboxes` 若傳入空 tuple，
-    代表這張圖只要完整台灣流場與岸線，不需要四個 flow-domain 視覺框；這只影響
-    PNG 上的標示，不改變遮罩、箭頭抽樣、流速縮放或任何輸入 `.npy` 資料。
+    只保留座標軸刻度與 `Longitude`、`Latitude`。`coordinate_tick_interval` 在
+    zoom 圖中固定經緯度主要刻度間距，避免三張放大區域圖因自動刻度選擇不同間距
+    而看起來尺度不一致。`region_bboxes` 若傳入空 tuple，代表這張圖只要完整台灣
+    流場與岸線，不需要四個 flow-domain 視覺框；這只影響 PNG 上的標示，不改變
+    遮罩、箭頭抽樣、流速縮放或任何輸入 `.npy` 資料。
     """
 
     lon_all = np.asarray(data["lon"], dtype=np.float64)
@@ -213,7 +217,7 @@ def draw_report_safe_current_map(
     draw_region_boxes(ax, region_bboxes, fill=False, zorder=8)
     ax.set_xlim(lon_min, lon_max)
     ax.set_ylim(lat_min, lat_max)
-    coordinate_ticks = apply_boundary_coordinate_ticks(ax, extent)
+    coordinate_ticks = apply_boundary_coordinate_ticks(ax, extent, tick_interval=coordinate_tick_interval)
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     ax.set_aspect("equal", adjustable="box")
@@ -285,6 +289,7 @@ def make_report_safe_region_maps(args: argparse.Namespace) -> list[Path]:
         dpi=args.dpi,
         vmax=vmax,
         draw_mask_land=True,
+        coordinate_tick_interval=None,
     )
     output_paths.append(main_path)
 
@@ -307,6 +312,7 @@ def make_report_safe_region_maps(args: argparse.Namespace) -> list[Path]:
             dpi=args.dpi,
             vmax=vmax,
             draw_mask_land=False,
+            coordinate_tick_interval=args.zoom_coordinate_tick_interval,
         )
         metadata.update({"id": zoom.id, "name": zoom.name})
         zoom_metadata.append(metadata)
@@ -367,7 +373,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--land-geojson",
         type=Path,
-        default=Path("data/geojson/taiwan_exact_coastline.geojson"),
+        default=Path("data/coastline/taiwan_exact_coastline.geojson"),
         help="WGS84 Polygon/MultiPolygon GeoJSON used for report land masking and visual overlay.",
     )
     parser.add_argument(
@@ -380,13 +386,25 @@ def parse_args() -> argparse.Namespace:
         "--zoom-target-arrows",
         type=int,
         default=300,
-        help="Approximate arrow count for each independent zoom map.",
+        help=(
+            "Approximate arrow count for each independent zoom map. The default keeps local flow patterns visible "
+            "after the one-decimal display extents are harmonized to 0.1-degree grid intervals."
+        ),
     )
     parser.add_argument(
         "--quiver-scale-multiplier",
         type=float,
         default=20.0,
         help="Multiplier applied to vmax for Matplotlib quiver scale; larger means shorter arrows.",
+    )
+    parser.add_argument(
+        "--zoom-coordinate-tick-interval",
+        type=float,
+        default=ZOOM_COORDINATE_TICK_INTERVAL_DEG,
+        help=(
+            "Major coordinate tick interval in degrees for the three independent zoom maps. "
+            "Boundary ticks are still added even when the extent is not an exact multiple."
+        ),
     )
     parser.add_argument(
         "--hide-main-region-boxes",

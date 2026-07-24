@@ -110,25 +110,26 @@ FLOW_DOMAIN_BBOXES = (
 )
 
 # 三張投影片用獨立放大圖。這些範圍比舊圖的 inset 更單純：不在圖上放名稱、
-# anchor 或連接線，只輸出乾淨經緯度座標圖。
+# anchor 或連接線，只輸出乾淨經緯度座標圖。bbox 邊界刻意採一位小數，讓報告圖
+# 的座標外框乾淨一致；範圍選擇以不向外放大為原則，避免主體在圖面中相對縮小。
 ZOOM_WINDOWS = (
     ZoomWindow(
         id="guishan",
         filename_suffix="guishan_zoom_clean",
         name="龜山島放大圖",
-        extent_lonlat=(121.78, 122.13, 24.68, 25.02),
+        extent_lonlat=(121.80, 122.20, 24.60, 25.00),
     ),
     ZoomWindow(
         id="gongliao",
         filename_suffix="gongliao_zoom_clean",
         name="貢寮放大圖",
-        extent_lonlat=(121.70, 122.22, 24.82, 25.32),
+        extent_lonlat=(121.70, 122.20, 24.80, 25.30),
     ),
     ZoomWindow(
         id="lienchiang_nangan_beigan",
         filename_suffix="lienchiang_nangan_beigan_zoom_clean",
         name="南北竿放大圖",
-        extent_lonlat=(119.78, 120.15, 26.05, 26.34),
+        extent_lonlat=(119.80, 120.20, 26.00, 26.40),
     ),
 )
 
@@ -143,6 +144,16 @@ BBOX_LINEWIDTH = 1.65
 # 引用時看得出裁切範圍；數量不能太高，否則小範圍 zoom 圖的經緯度數字會互相重疊。
 BOUNDARY_TICK_MAX_COUNT = 9
 BOUNDARY_TICK_MIN_GAP_FACTOR = 0.65
+# 固定間距 zoom 圖要盡量保留 0.1 度尺度刻度，因此只移除非常貼近邊界的內部刻度。
+FIXED_INTERVAL_TICK_MIN_GAP_FACTOR = 0.35
+ZOOM_COORDINATE_TICK_INTERVAL_DEG = 0.1
+"""三張獨立放大圖預設使用的經緯度主要刻度間距。
+
+單位是 WGS84 經緯度的度。三張 zoom 圖的 bbox 大小不同，若完全交給 Matplotlib
+自動刻度，龜山島可能選到 0.05 度、貢寮可能選到 0.1 度，放在同一份報告時尺度
+語意不一致。固定 zoom 圖內部刻度間距可讓讀者用相同座標尺度比較不同區域；圖面
+四個上下限仍會額外標示，因此最靠近邊界的一段距離可能小於指定間距。
+"""
 
 
 def validate_time_index(time_index: int, time_count: int) -> int:
@@ -178,14 +189,27 @@ def slice_axis_to_extent(axis: np.ndarray, lower: float, upper: float, axis_name
     return slice(start, stop)
 
 
-def boundary_inclusive_ticks(lower: float, upper: float, *, max_count: int = BOUNDARY_TICK_MAX_COUNT) -> np.ndarray:
+def boundary_inclusive_ticks(
+    lower: float,
+    upper: float,
+    *,
+    max_count: int = BOUNDARY_TICK_MAX_COUNT,
+    tick_interval: float | None = None,
+) -> np.ndarray:
     """建立一定包含上下界的座標軸 major ticks。
 
     Matplotlib 自動刻度會優先選擇好看的整數間距，但不保證 `set_xlim()`/`set_ylim()`
     指定的圖面邊界本身會被標示。報告用 zoom 圖需要明確看出四個經緯度裁切邊界，
-    因此此函式先用 `MaxNLocator` 產生可讀的中間刻度，再強制加入 `lower` 與
-    `upper`。若自動刻度太靠近邊界，會移除該中間刻度，避免像 `121.78` 和 `121.80`
-    這類標籤在小圖上擠在一起。
+    並且三張放大圖需要固定同一尺度；因此 `tick_interval` 有值時，內部刻度會使用
+    該間距的整齊倍數，例如 0.1 度刻度會落在 `121.8`、`121.9` 這類位置，再額外
+    加入 `lower` 與 `upper`。若 `tick_interval=None`，則保留主圖使用的
+    `MaxNLocator` 自動刻度，再強制加入上下界。
+
+    當固定間距刻度非常靠近上下界時，會移除該內部刻度，避免邊界標籤和鄰近標籤
+    重疊；固定間距模式的避讓門檻比自動模式低，原因是 zoom 圖需要盡量保留 0.1 度
+    內部刻度，讓尺度差異可被讀者辨識。這表示最靠近邊界的一段距離可小於或略大於
+    `tick_interval`，但圖面核心的內部座標尺度仍維持一致，且四個 bbox 上下限一定
+    可讀。
 
     輸入與輸出皆為 WGS84 經緯度數值，函式只影響圖面文字標示，不改變資料 slice、
     pcolormesh、GeoJSON 疊圖或 quiver 箭頭位置。
@@ -196,16 +220,32 @@ def boundary_inclusive_ticks(lower: float, upper: float, *, max_count: int = BOU
     if np.isclose(lower, upper):
         return np.asarray([float(lower)], dtype=np.float64)
 
-    locator = mticker.MaxNLocator(nbins=max(max_count - 2, 1), steps=[1, 2, 2.5, 5, 10])
-    candidate_ticks = np.asarray(locator.tick_values(lower, upper), dtype=np.float64)
-    interior_ticks = candidate_ticks[(candidate_ticks > lower) & (candidate_ticks < upper)]
+    if tick_interval is not None:
+        if tick_interval <= 0:
+            raise ValueError(f"tick_interval must be positive, got {tick_interval}")
+        first_tick = np.ceil((lower / tick_interval) - 1e-10) * tick_interval
+        tick_count = int(np.floor((upper - first_tick) / tick_interval)) + 1
+        interior_ticks = first_tick + tick_interval * np.arange(max(tick_count, 0), dtype=np.float64)
+        interior_ticks = interior_ticks[(interior_ticks > lower) & (interior_ticks < upper)]
+    else:
+        locator = mticker.MaxNLocator(nbins=max(max_count - 2, 1), steps=[1, 2, 2.5, 5, 10])
+        candidate_ticks = np.asarray(locator.tick_values(lower, upper), dtype=np.float64)
+        interior_ticks = candidate_ticks[(candidate_ticks > lower) & (candidate_ticks < upper)]
     if interior_ticks.size:
         # 以目前自動刻度的最小間距當作標籤安全距離基準。距邊界太近的中間刻度不具備
         # 額外判讀價值，且容易和強制加入的邊界標籤重疊，所以在這裡排除。
         diffs = np.diff(np.sort(interior_ticks))
-        typical_step = float(np.nanmin(diffs)) if diffs.size else float(upper - lower)
-        min_gap = typical_step * BOUNDARY_TICK_MIN_GAP_FACTOR
-        interior_ticks = interior_ticks[(interior_ticks - lower >= min_gap) & (upper - interior_ticks >= min_gap)]
+        typical_step = float(tick_interval) if tick_interval is not None else (
+            float(np.nanmin(diffs)) if diffs.size else float(upper - lower)
+        )
+        gap_factor = BOUNDARY_TICK_MIN_GAP_FACTOR if tick_interval is None else FIXED_INTERVAL_TICK_MIN_GAP_FACTOR
+        min_gap = typical_step * gap_factor
+        if tick_interval is None:
+            interior_ticks = interior_ticks[(interior_ticks - lower >= min_gap) & (upper - interior_ticks >= min_gap)]
+        else:
+            # 固定間距 zoom 圖仍要排除太貼近上下界的內部刻度。上下界會另外標示，
+            # 所以保留重疊風險較高的鄰近刻度沒有額外資訊價值。
+            interior_ticks = interior_ticks[(interior_ticks - lower >= min_gap) & (upper - interior_ticks >= min_gap)]
 
     ticks = np.concatenate(([float(lower)], interior_ticks, [float(upper)]))
     ticks = np.unique(np.round(ticks, decimals=10))
@@ -223,12 +263,13 @@ def boundary_inclusive_ticks(lower: float, upper: float, *, max_count: int = BOU
     return ticks.astype(np.float64)
 
 
-def format_coordinate_tick_labels(ticks: np.ndarray) -> list[str]:
+def format_coordinate_tick_labels(ticks: np.ndarray, *, min_decimals: int = 0) -> list[str]:
     """依刻度間距產生一致的小數位標籤。
 
-    大範圍主圖通常使用 0.5 或 1 度間距，因此一位或零位小數即可；小範圍 zoom 圖
-    會出現 `121.78` 這類非整數邊界，需保留兩位小數，否則上下界會被四捨五入成
-    和鄰近刻度相同的值。此函式只格式化座標軸文字，不更動實際 tick 位置。
+    大範圍主圖通常使用 0.5 或 1 度間距，因此一位或零位小數即可；固定間距 zoom
+    圖則需要一致顯示小數位，例如 `121.80`、`121.90`、`122.00`。`min_decimals`
+    讓 zoom 圖至少保留兩位小數，避免不同圖因浮點間距推論而出現一位與兩位小數
+    混用。此函式只格式化座標軸文字，不更動實際 tick 位置。
     """
 
     sorted_ticks = np.sort(np.asarray(ticks, dtype=np.float64))
@@ -243,31 +284,37 @@ def format_coordinate_tick_labels(ticks: np.ndarray) -> list[str]:
         decimals = 2
     else:
         decimals = 3
+    decimals = max(decimals, min_decimals)
     return [f"{0.0 if np.isclose(tick, 0.0) else tick:.{decimals}f}" for tick in sorted_ticks]
 
 
 def apply_boundary_coordinate_ticks(
     ax: plt.Axes,
     extent: tuple[float, float, float, float],
-) -> dict[str, list[float]]:
+    *,
+    tick_interval: float | None = None,
+) -> dict[str, list[float] | float | None]:
     """把圖面四個經緯度邊界固定標到座標軸上。
 
     `extent` 使用專案標準順序 `(lon_min, lon_max, lat_min, lat_max)`。函式會設定
     x/y major locator 與 formatter，讓輸出 PNG 的下方可讀到左右經度邊界，左側可
-    讀到下上緯度邊界。回傳值寫入 sidecar JSON，便於日後追溯某張圖實際使用哪些
-    顯示刻度。
+    讀到下上緯度邊界。`tick_interval` 只應用在需要跨圖比較尺度的 zoom 圖；主圖
+    傳入 `None` 時仍使用自動好讀刻度。回傳值寫入 sidecar JSON，便於日後追溯某張
+    圖實際使用哪些顯示刻度與固定間距設定。
     """
 
     lon_min, lon_max, lat_min, lat_max = extent
-    x_ticks = boundary_inclusive_ticks(lon_min, lon_max)
-    y_ticks = boundary_inclusive_ticks(lat_min, lat_max)
+    x_ticks = boundary_inclusive_ticks(lon_min, lon_max, tick_interval=tick_interval)
+    y_ticks = boundary_inclusive_ticks(lat_min, lat_max, tick_interval=tick_interval)
+    min_decimals = 2 if tick_interval is not None else 0
     ax.xaxis.set_major_locator(mticker.FixedLocator(x_ticks))
-    ax.xaxis.set_major_formatter(mticker.FixedFormatter(format_coordinate_tick_labels(x_ticks)))
+    ax.xaxis.set_major_formatter(mticker.FixedFormatter(format_coordinate_tick_labels(x_ticks, min_decimals=min_decimals)))
     ax.yaxis.set_major_locator(mticker.FixedLocator(y_ticks))
-    ax.yaxis.set_major_formatter(mticker.FixedFormatter(format_coordinate_tick_labels(y_ticks)))
+    ax.yaxis.set_major_formatter(mticker.FixedFormatter(format_coordinate_tick_labels(y_ticks, min_decimals=min_decimals)))
     return {
         "longitude": [float(tick) for tick in x_ticks],
         "latitude": [float(tick) for tick in y_ticks],
+        "fixed_interval_deg": None if tick_interval is None else float(tick_interval),
     }
 
 
@@ -441,13 +488,16 @@ def draw_clean_current_map(
     dpi: int,
     vmax: float,
     draw_mask_land: bool,
+    coordinate_tick_interval: float | None,
 ) -> dict:
     """繪製單張乾淨流場圖。
 
     圖面規則非常嚴格：不呼叫 `set_title()`、不建立 legend、不畫 quiverkey、不畫
     label annotation，也不畫 anchor 文字。唯一可見文字來自座標軸刻度與
-    `Longitude`/`Latitude`。這樣做是為了讓投影片或論文排版時能用外部文字系統
-    統一標題、說明與編號。
+    `Longitude`/`Latitude`。`coordinate_tick_interval` 只用於三張放大圖，用來把
+    經緯度主要刻度固定成相同度數間距；主圖傳入 `None` 時保留自動好讀刻度。這樣
+    做是為了讓投影片或論文排版時能用外部文字系統統一標題、說明與編號，同時避免
+    不同 zoom 圖被自動刻度畫成不同尺度。
     """
 
     lon_all = np.asarray(data["lon"], dtype=np.float64)
@@ -511,7 +561,7 @@ def draw_clean_current_map(
     draw_region_boxes(ax, region_bboxes, fill=False, zorder=7)
     ax.set_xlim(lon_min, lon_max)
     ax.set_ylim(lat_min, lat_max)
-    coordinate_ticks = apply_boundary_coordinate_ticks(ax, extent)
+    coordinate_ticks = apply_boundary_coordinate_ticks(ax, extent, tick_interval=coordinate_tick_interval)
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     ax.set_aspect("equal", adjustable="box")
@@ -573,6 +623,7 @@ def make_clean_region_maps(args: argparse.Namespace) -> list[Path]:
         dpi=args.dpi,
         vmax=vmax,
         draw_mask_land=True,
+        coordinate_tick_interval=None,
     )
     output_paths.append(main_path)
 
@@ -593,6 +644,7 @@ def make_clean_region_maps(args: argparse.Namespace) -> list[Path]:
             dpi=args.dpi,
             vmax=vmax,
             draw_mask_land=False,
+            coordinate_tick_interval=args.zoom_coordinate_tick_interval,
         )
         metadata.update({"id": zoom.id, "name": zoom.name})
         zoom_metadata.append(metadata)
@@ -660,13 +712,25 @@ def parse_args() -> argparse.Namespace:
         "--zoom-target-arrows",
         type=int,
         default=300,
-        help="Approximate arrow count for each independent zoom map.",
+        help=(
+            "Approximate arrow count for each independent zoom map. The default keeps local flow patterns visible "
+            "after the one-decimal display extents are harmonized to 0.1-degree grid intervals."
+        ),
     )
     parser.add_argument(
         "--quiver-scale-multiplier",
         type=float,
         default=20.0,
         help="Multiplier applied to vmax for Matplotlib quiver scale; larger means shorter arrows.",
+    )
+    parser.add_argument(
+        "--zoom-coordinate-tick-interval",
+        type=float,
+        default=ZOOM_COORDINATE_TICK_INTERVAL_DEG,
+        help=(
+            "Major coordinate tick interval in degrees for the three independent zoom maps. "
+            "Boundary ticks are still added even when the extent is not an exact multiple."
+        ),
     )
     parser.add_argument("--dpi", type=int, default=180, help="Output PNG resolution.")
     return parser.parse_args()
