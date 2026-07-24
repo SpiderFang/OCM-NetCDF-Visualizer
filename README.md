@@ -277,6 +277,12 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
 sidecar JSON 會記錄使用的岸線 GeoJSON、額外移除的報告遮罩格點數、每張圖的
 有效箭頭數，以及「原始 `mask.npy` 未被修改」的語意。
 
+若需要和主圖相同範圍、相同時間與相同岸線遮罩，但不顯示四個 flow-domain 視覺框，
+可加入 `--hide-main-region-boxes`。此參數只會略過主圖 PNG 上的半透明 bbox 與外框，
+不會改變 `mask.npy`、流速箭頭抽樣、岸線遮罩或任何輸入資料；輸出檔名會改用
+`surface_layer_047_first_frame_no_region_bbox_report_safe.png` 與對應 JSON，方便和
+原本 `surface_layer_047_first_frame_four_region_equal_bbox_report_safe.png` 並存。
+
 ## 4. 串接全年 2D GIF
 
 若 12 個月份的同一種 2D GIF 都已完成，可用 `concat_ocm_year_gifs.py` 直接把每月

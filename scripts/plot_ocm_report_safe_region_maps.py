@@ -136,7 +136,9 @@ def draw_report_safe_current_map(
        同時避免同一條岸線被前後重複描邊。
 
     圖面仍維持乾淨圖規則：不加標題、legend、quiverkey、區域名稱或說明文字，
-    只保留座標軸刻度與 `Longitude`、`Latitude`。
+    只保留座標軸刻度與 `Longitude`、`Latitude`。`region_bboxes` 若傳入空 tuple，
+    代表這張圖只要完整台灣流場與岸線，不需要四個 flow-domain 視覺框；這只影響
+    PNG 上的標示，不改變遮罩、箭頭抽樣、流速縮放或任何輸入 `.npy` 資料。
     """
 
     lon_all = np.asarray(data["lon"], dtype=np.float64)
@@ -204,7 +206,8 @@ def draw_report_safe_current_map(
         )
 
     # 這次陸地疊圖是報告用視覺保險：即使海上 anchor 的箭頭線段跨過岸線，
-    # 陸地 polygon 仍會蓋住進入陸域的部分。bbox 外框最後畫，避免被陸地遮住。
+    # 陸地 polygon 仍會蓋住進入陸域的部分。若有 bbox，外框最後畫，避免被陸地遮住；
+    # 若 `region_bboxes` 為空，這個呼叫會自然略過，輸出即為無四框的完整主圖。
     draw_vector_land_overlay(ax, land_rings, extent, linewidth=REPORT_LAND_EDGE_WIDTH, zorder=7)
     draw_region_boxes(ax, region_bboxes, fill=False, zorder=8)
     ax.set_xlim(lon_min, lon_max)
@@ -258,7 +261,11 @@ def make_report_safe_region_maps(args: argparse.Namespace) -> list[Path]:
     full_extent = (float(np.nanmin(lon)), float(np.nanmax(lon)), float(np.nanmin(lat)), float(np.nanmax(lat)))
 
     output_paths: list[Path] = []
-    main_path = output_dir / f"{stem}_four_region_equal_bbox_report_safe.png"
+    # `--hide-main-region-boxes` 用於產生和原本四框主圖相同範圍、同一層、同一時間的
+    # 無框版本。檔名改用 `no_region_bbox`，避免覆蓋需要保留區域框的報告版本。
+    main_region_bboxes = () if args.hide_main_region_boxes else FLOW_DOMAIN_BBOXES
+    main_suffix = "no_region_bbox_report_safe" if args.hide_main_region_boxes else "four_region_equal_bbox_report_safe"
+    main_path = output_dir / f"{stem}_{main_suffix}.png"
     main_metadata = draw_report_safe_current_map(
         data,
         main_path,
@@ -268,7 +275,7 @@ def make_report_safe_region_maps(args: argparse.Namespace) -> list[Path]:
         land_rings=land_rings,
         report_land_mask_all=report_land_mask,
         effective_ocean_mask_all=effective_ocean_mask,
-        region_bboxes=FLOW_DOMAIN_BBOXES,
+        region_bboxes=main_region_bboxes,
         target_arrows=args.full_target_arrows,
         quiver_scale_multiplier=args.quiver_scale_multiplier,
         figsize=(8.5, 11.0),
@@ -302,7 +309,7 @@ def make_report_safe_region_maps(args: argparse.Namespace) -> list[Path]:
         zoom_metadata.append(metadata)
         output_paths.append(zoom_path)
 
-    metadata_path = output_dir / f"{stem}_four_region_equal_bbox_report_safe.json"
+    metadata_path = output_dir / f"{stem}_{main_suffix}.json"
     metadata = {
         "source_dir": str(args.input_dir),
         "land_geojson": str(args.land_geojson),
@@ -327,6 +334,7 @@ def make_report_safe_region_maps(args: argparse.Namespace) -> list[Path]:
             "note": "Higher scale multiplier means shorter arrows. No quiver scale key is drawn.",
         },
         "flow_domain_bboxes": [asdict(region) for region in FLOW_DOMAIN_BBOXES],
+        "main_region_boxes_drawn": not args.hide_main_region_boxes,
         "main_figure": main_metadata,
         "zoom_figures": zoom_metadata,
     }
@@ -376,6 +384,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=20.0,
         help="Multiplier applied to vmax for Matplotlib quiver scale; larger means shorter arrows.",
+    )
+    parser.add_argument(
+        "--hide-main-region-boxes",
+        action="store_true",
+        help=(
+            "Do not draw the four flow-domain rectangles on the full-domain main map. "
+            "This keeps the same data extent and coastline masking but writes a no_region_bbox output."
+        ),
     )
     parser.add_argument("--dpi", type=int, default=180, help="Output PNG resolution.")
     return parser.parse_args()
