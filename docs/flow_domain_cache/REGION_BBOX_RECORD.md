@@ -16,8 +16,8 @@ flow domain `.npy` 快取」的資料產品規格。
   - 連江縣 7 個子區共用同一份連江 `flow_domain` 快取。
 - 新竹與屏東／海生館不和其它研究區共用快取，但仍使用同一物理大小的矩形
   `flow_domain`，讓五個研究區的前處理快取產品維持一致尺度。
-- EOF 分析前，必須先從 `flow_domain` `.npy` 依 `analysis_bbox`、`focus_bbox`
-  或 AOI polygon 切出真正要分析的空間域；`flow_domain` 不是研究結論邊界。
+- EOF 分析前，必須先從 `flow_domain` `.npy` 依 `focus_bbox` 或 AOI polygon
+  切出真正要分析的空間域；`flow_domain` 不是研究結論邊界。
 
 ## bbox 順序與座標系統
 
@@ -46,7 +46,7 @@ bbox，作為目前 v3 候選快取域。原因是本需求沒有唯一「標準
 `119.750000 121.750000 21.050000 22.450000` 套用到其它區域仍偏大；該尺寸可留作
 報告中解釋「小型外海影響框」的視覺參考，但不適合直接作為 raw NetCDF 讀取範圍。
 因此 v3 將資料快取框縮到約 `150 km x 100 km`，定位為「後續
-`analysis_bbox/focus_bbox` 的來源 tile」，而不是完整外海影響域。
+`focus_bbox` 的來源 tile」，而不是完整外海影響域。
 
 屏東／海生館 v3 錨點 bbox：
 
@@ -107,10 +107,10 @@ lat_max = center_lat + lat_half_deg
 
 | 研究區 | 使用的 flow cache | 後續切分方式 | 備註 |
 | --- | --- | --- | --- |
-| 宜蘭縣龜山島海域 | 東北台灣共用域 | 從共用 `.npy` 切 `analysis_bbox` 或 AOI polygon | `flow_domain` 保留龜山島、宜蘭外海、東北角與黑潮近岸背景；本版已依 geojson.io 檢視結果略往東北平移，以減少西南側陸地並增加外側海域緩衝。EOF 前仍要先切龜山島分析域。 |
-| 新北市貢寮海域 | 東北台灣共用域 | 從共用 `.npy` 切 `analysis_bbox` 或新版 compact focus bbox | 舊版貢寮聚焦範圍 `121.40 123.50 24.85 26.20` 已超出本版 compact cache，不適合作為直接切片範圍；後續需另定較小 `analysis_bbox`，或改以 AOI polygon 從 cache 內取樣。 |
-| 新竹縣外海 | 新竹單區域 | 從單區域 `.npy` 切新竹 `analysis_bbox` | 本版已將新竹框整體往西移，減少東側陸地浪費，同時保留新竹外海與台灣海峽東側背景。 |
-| 屏東縣國立海洋生物博物館周邊海域 | 屏東／海生館單區域 | 從單區域 `.npy` 切後灣／海生館 `analysis_bbox` 或 AOI polygon | 本版東界貼近蘭嶼東側，保留蘭嶼陸地視覺辨識，但不再納入過多蘭嶼東側外洋。 |
+| 宜蘭縣龜山島海域 | 東北台灣共用域 | 從共用 `.npy` 切 `focus_bbox` 或 AOI polygon | `flow_domain` 保留龜山島、宜蘭外海、東北角與黑潮近岸背景；本版已依 geojson.io 檢視結果略往東北平移，以減少西南側陸地並增加外側海域緩衝。EOF 前仍要先切龜山島分析域。 |
+| 新北市貢寮海域 | 東北台灣共用域 | 從共用 `.npy` 切 `focus_bbox` 或 AOI polygon | 舊版貢寮聚焦範圍 `121.40 123.50 24.85 26.20` 已超出本版 compact cache，不適合作為直接切片範圍；後續需另定較小 `focus_bbox`，或改以 AOI polygon 從 cache 內取樣。 |
+| 新竹縣外海 | 新竹單區域 | 從單區域 `.npy` 切新竹 `focus_bbox` 或 AOI polygon | 本版已將新竹框整體往西移，減少東側陸地浪費，同時保留新竹外海與台灣海峽東側背景。 |
+| 屏東縣國立海洋生物博物館周邊海域 | 屏東／海生館單區域 | 從單區域 `.npy` 切後灣／海生館 `focus_bbox` 或 AOI polygon | 本版東界貼近蘭嶼東側，保留蘭嶼陸地視覺辨識，但不再納入過多蘭嶼東側外洋。 |
 | 連江縣海域 | 連江共用域 | 從共用 `.npy` 切 7 個 `focus_bbox` 或 AOI polygon | 連江共用域供北竿 3 區與南竿 4 區共用；7 個子區統計不得直接使用整個 flow domain。 |
 
 ## 屏東／海生館縮小範圍判定
@@ -147,14 +147,14 @@ lat_max = center_lat + lat_half_deg
 
 ```text
 load flow_domain .npy
-→ 依 lon.npy / lat.npy 切 analysis_bbox 或 focus_bbox
+→ 依 lon.npy / lat.npy 切 `focus_bbox`
 → 套用 mask.npy 與選用 AOI polygon
 → 建立 EOF 資料矩陣
 → 執行 EOF / PC / loading 分析
 ```
 
 - 龜山島與貢寮因距離近且共享東北台灣黑潮、陸棚交換與沿岸流背景，`flow_domain`
-  重疊或共用是合理的；兩者的研究分離應靠 EOF 前的 `analysis_bbox` 或 AOI mask。
+  重疊或共用是合理的；兩者的研究分離應靠 EOF 前的 `focus_bbox` 或 AOI mask。
 - 連江 7 子區距離更近，整個連江 flow cache 僅作為資料快取。子區熱點統計與 EOF
   應使用既有低重疊 `focus_bbox` 或更精細的 polygon，不得直接用整個連江共用域代表單一子區。
 - 新竹與屏東／海生館雖不共用域，但仍使用相同物理尺寸，以維持 cache 資料量、
@@ -191,14 +191,14 @@ uv run python3 scripts/preprocess_ocm_month.py \
 - `lon.npy`、`lat.npy`、`mask.npy`、`u.npy`、`v.npy`、`speed.npy`、`elev.npy`
   的 shape 必須符合 `time, layer, lat, lon` 或 `time, lat, lon` 規格。
 - 表層流場圖不得空白，且不能有明顯陸域流速殘留。
-- 每個研究區後續要使用的 `analysis_bbox`、`focus_bbox` 或 AOI polygon 必須完全落在
-  對應 flow cache 內；若需要 EOF 邊界緩衝，focus bbox 不應直接貼住 flow cache 邊界。
+- 每個研究區後續要使用的 `focus_bbox` 或 AOI polygon 必須完全落在
+  對應 flow cache 內；若需要 EOF 邊界緩衝，`focus_bbox` 不應直接貼住 flow cache 邊界。
 - smoke test 只能證明 bbox、插值、遮罩與圖面流程可用；正式 EOF 或報告結論仍需使用
   完整月份或完整年度時間序列。
 
 ## 待後續補充
 
-- 龜山島、貢寮、新竹、屏東／海生館與連江 7 子區的正式 `analysis_bbox` 或 AOI polygon。
+- 龜山島、貢寮、新竹、屏東／海生館與連江 7 子區的正式 `focus_bbox` 或 AOI polygon。
 - 同尺寸 flow cache 的完整月份批次命名規則與輸出目錄規則。
 - EOF 腳本的欄位需求，例如使用 `u/v`、`speed`、`elev_anomaly`、深度平均流或指定 sigma layer。
 - 四份 flow cache 的 smoke test 圖面、有效海域比例、資料量與 QC 結果。

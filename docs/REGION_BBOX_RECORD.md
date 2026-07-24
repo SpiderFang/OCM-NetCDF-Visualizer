@@ -562,7 +562,7 @@ outputs/ocm_2025_01_lienchiang_7subregions_bbox_review_1km/figures/lienchiang_7_
 
 - 低重疊 `focus_bbox` 表（供報告標示、熱點比較或格點統計；專案 CLI 順序為 `lon_min lon_max lat_min lat_max`）：
 
-| 編號 | 子區 | focus bbox（CLI 順序） | GIS / GeoJSON focus bbox | 設計理由 |
+| 編號 | 子區 | `focus_bbox`（CLI 順序） | GIS / GeoJSON `focus_bbox` | 設計理由 |
 | --- | --- | --- | --- | --- |
 | B1 | 北竿尼姑山 | `119.910 119.985 26.185 26.215` | `[119.910, 26.185, 119.985, 26.215]` | 以 `26.185N` 作南北竿 focus 分界，保留尼姑山西南近岸但避免與南竿北岸重疊。 |
 | B2 | 北竿白廟／鐵尖島 | `119.940 120.020 26.255 26.305` | `[119.940, 26.255, 120.020, 26.305]` | 鎖定鐵尖島／白廟外礁，和 B3 芹壁龜島留約 `0.005°` 緩衝。 |

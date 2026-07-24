@@ -72,8 +72,8 @@ class ZoomWindow:
     """獨立放大圖的可視範圍定義。
 
     `extent_lonlat` 只控制輸出圖的裁切範圍，目的是讓龜山島、貢寮岬角與南北竿岸線
-    在投影片上可直接使用。它不代表正式分析 bbox；後續若要計算 EOF、統計或 AOI
-    平均，仍應另行定義 analysis_bbox、focus_bbox 或 polygon mask。
+    在投影片上可直接使用。它不代表正式 `focus_bbox`；後續若要計算 EOF、統計或 AOI
+    平均，仍應另行定義 `focus_bbox` 或 polygon mask。
     """
 
     id: str
