@@ -33,6 +33,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 
 from visualize_ocm_month import (
@@ -138,6 +139,11 @@ BBOX_FACE_COLOR = "#7476b6"
 BBOX_FACE_ALPHA = 0.18
 BBOX_LINEWIDTH = 1.65
 
+# 座標軸最多顯示的主要刻度數。這裡刻意包含圖面上下左右邊界，讓 PNG 可直接被報告
+# 引用時看得出裁切範圍；數量不能太高，否則小範圍 zoom 圖的經緯度數字會互相重疊。
+BOUNDARY_TICK_MAX_COUNT = 9
+BOUNDARY_TICK_MIN_GAP_FACTOR = 0.65
+
 
 def validate_time_index(time_index: int, time_count: int) -> int:
     """解析時間索引並支援 Python 負索引。
@@ -170,6 +176,99 @@ def slice_axis_to_extent(axis: np.ndarray, lower: float, upper: float, axis_name
     start = max(int(indices[0]) - 1, 0)
     stop = min(int(indices[-1]) + 2, axis.size)
     return slice(start, stop)
+
+
+def boundary_inclusive_ticks(lower: float, upper: float, *, max_count: int = BOUNDARY_TICK_MAX_COUNT) -> np.ndarray:
+    """建立一定包含上下界的座標軸 major ticks。
+
+    Matplotlib 自動刻度會優先選擇好看的整數間距，但不保證 `set_xlim()`/`set_ylim()`
+    指定的圖面邊界本身會被標示。報告用 zoom 圖需要明確看出四個經緯度裁切邊界，
+    因此此函式先用 `MaxNLocator` 產生可讀的中間刻度，再強制加入 `lower` 與
+    `upper`。若自動刻度太靠近邊界，會移除該中間刻度，避免像 `121.78` 和 `121.80`
+    這類標籤在小圖上擠在一起。
+
+    輸入與輸出皆為 WGS84 經緯度數值，函式只影響圖面文字標示，不改變資料 slice、
+    pcolormesh、GeoJSON 疊圖或 quiver 箭頭位置。
+    """
+
+    if lower > upper:
+        raise ValueError(f"tick lower bound {lower} is greater than upper bound {upper}")
+    if np.isclose(lower, upper):
+        return np.asarray([float(lower)], dtype=np.float64)
+
+    locator = mticker.MaxNLocator(nbins=max(max_count - 2, 1), steps=[1, 2, 2.5, 5, 10])
+    candidate_ticks = np.asarray(locator.tick_values(lower, upper), dtype=np.float64)
+    interior_ticks = candidate_ticks[(candidate_ticks > lower) & (candidate_ticks < upper)]
+    if interior_ticks.size:
+        # 以目前自動刻度的最小間距當作標籤安全距離基準。距邊界太近的中間刻度不具備
+        # 額外判讀價值，且容易和強制加入的邊界標籤重疊，所以在這裡排除。
+        diffs = np.diff(np.sort(interior_ticks))
+        typical_step = float(np.nanmin(diffs)) if diffs.size else float(upper - lower)
+        min_gap = typical_step * BOUNDARY_TICK_MIN_GAP_FACTOR
+        interior_ticks = interior_ticks[(interior_ticks - lower >= min_gap) & (upper - interior_ticks >= min_gap)]
+
+    ticks = np.concatenate(([float(lower)], interior_ticks, [float(upper)]))
+    ticks = np.unique(np.round(ticks, decimals=10))
+    if ticks.size > max_count:
+        # 極小 bbox 或 locator 選到太密間距時，優先保留邊界，再等距抽樣中間刻度；這讓
+        # 報告圖仍可讀，同時維持「上下左右邊界一定標示」這個核心需求。
+        interior = ticks[1:-1]
+        keep_count = max(max_count - 2, 0)
+        if keep_count > 0 and interior.size:
+            keep_indices = np.linspace(0, interior.size - 1, keep_count, dtype=int)
+            interior = interior[keep_indices]
+        else:
+            interior = np.asarray([], dtype=np.float64)
+        ticks = np.concatenate(([float(lower)], interior, [float(upper)]))
+    return ticks.astype(np.float64)
+
+
+def format_coordinate_tick_labels(ticks: np.ndarray) -> list[str]:
+    """依刻度間距產生一致的小數位標籤。
+
+    大範圍主圖通常使用 0.5 或 1 度間距，因此一位或零位小數即可；小範圍 zoom 圖
+    會出現 `121.78` 這類非整數邊界，需保留兩位小數，否則上下界會被四捨五入成
+    和鄰近刻度相同的值。此函式只格式化座標軸文字，不更動實際 tick 位置。
+    """
+
+    sorted_ticks = np.sort(np.asarray(ticks, dtype=np.float64))
+    diffs = np.diff(sorted_ticks)
+    positive_diffs = diffs[diffs > 0]
+    min_step = float(np.nanmin(positive_diffs)) if positive_diffs.size else 1.0
+    if min_step >= 1.0:
+        decimals = 0
+    elif min_step >= 0.1:
+        decimals = 1
+    elif min_step >= 0.01:
+        decimals = 2
+    else:
+        decimals = 3
+    return [f"{0.0 if np.isclose(tick, 0.0) else tick:.{decimals}f}" for tick in sorted_ticks]
+
+
+def apply_boundary_coordinate_ticks(
+    ax: plt.Axes,
+    extent: tuple[float, float, float, float],
+) -> dict[str, list[float]]:
+    """把圖面四個經緯度邊界固定標到座標軸上。
+
+    `extent` 使用專案標準順序 `(lon_min, lon_max, lat_min, lat_max)`。函式會設定
+    x/y major locator 與 formatter，讓輸出 PNG 的下方可讀到左右經度邊界，左側可
+    讀到下上緯度邊界。回傳值寫入 sidecar JSON，便於日後追溯某張圖實際使用哪些
+    顯示刻度。
+    """
+
+    lon_min, lon_max, lat_min, lat_max = extent
+    x_ticks = boundary_inclusive_ticks(lon_min, lon_max)
+    y_ticks = boundary_inclusive_ticks(lat_min, lat_max)
+    ax.xaxis.set_major_locator(mticker.FixedLocator(x_ticks))
+    ax.xaxis.set_major_formatter(mticker.FixedFormatter(format_coordinate_tick_labels(x_ticks)))
+    ax.yaxis.set_major_locator(mticker.FixedLocator(y_ticks))
+    ax.yaxis.set_major_formatter(mticker.FixedFormatter(format_coordinate_tick_labels(y_ticks)))
+    return {
+        "longitude": [float(tick) for tick in x_ticks],
+        "latitude": [float(tick) for tick in y_ticks],
+    }
 
 
 def ring_overlaps_extent(ring: np.ndarray, extent: tuple[float, float, float, float]) -> bool:
@@ -412,6 +511,7 @@ def draw_clean_current_map(
     draw_region_boxes(ax, region_bboxes, fill=False, zorder=7)
     ax.set_xlim(lon_min, lon_max)
     ax.set_ylim(lat_min, lat_max)
+    coordinate_ticks = apply_boundary_coordinate_ticks(ax, extent)
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     ax.set_aspect("equal", adjustable="box")
@@ -425,6 +525,7 @@ def draw_clean_current_map(
     return {
         "path": str(output_path),
         "extent_lonlat": [float(lon_min), float(lon_max), float(lat_min), float(lat_max)],
+        "coordinate_ticks": coordinate_ticks,
         "target_arrows": int(target_arrows),
         "quiver_step_yx": [int(sy), int(sx)],
         "valid_vector_cells": int(np.count_nonzero(valid_vector)),

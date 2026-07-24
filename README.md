@@ -230,7 +230,10 @@ PNG 圖面刻意只保留經緯度刻度數字與 `Longitude`、`Latitude`；不
 比例尺文字、區域名稱或註解。流速箭頭使用同一個 98 百分位流速作為縮放基準，
 但預設 `--quiver-scale-multiplier 20`，因此箭頭比一般動畫更短、更細。三張獨立
 放大圖只顯示 GeoJSON 向量陸地輪廓；`mask.npy` 仍用於排除陸地箭頭，但不再把
-1 km 方格陸地畫出來，避免小島岸線外側出現階梯狀灰塊。
+1 km 方格陸地畫出來，避免小島岸線外側出現階梯狀灰塊。所有主圖與放大圖都會
+強制把圖面經緯度左右/上下邊界加入座標軸主要刻度；這個設計是為了讓報告截圖能
+直接讀出裁切範圍，不會因 Matplotlib 自動刻度省略 bbox 上下限而被誤認為邊界
+沒有切齊。
 
 目前 1 km GeoJSON QC 第一幀可用以下指令重畫：
 
@@ -275,7 +278,7 @@ UV_CACHE_DIR=work/uv-cache MPLCONFIGDIR=work/matplotlib-cache \
 
 報告安全版輸出檔名會使用 `_report_safe` 後綴，避免覆蓋舊版 `_clean` 成果；
 sidecar JSON 會記錄使用的岸線 GeoJSON、額外移除的報告遮罩格點數、每張圖的
-有效箭頭數，以及「原始 `mask.npy` 未被修改」的語意。
+有效箭頭數、實際顯示的邊界刻度，以及「原始 `mask.npy` 未被修改」的語意。
 
 若需要和主圖相同範圍、相同時間與相同岸線遮罩，但不顯示四個 flow-domain 視覺框，
 可加入 `--hide-main-region-boxes`。此參數只會略過主圖 PNG 上的半透明 bbox 與外框，

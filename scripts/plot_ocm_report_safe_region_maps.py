@@ -36,6 +36,7 @@ import numpy as np
 from plot_ocm_clean_region_maps import (
     FLOW_DOMAIN_BBOXES,
     ZOOM_WINDOWS,
+    apply_boundary_coordinate_ticks,
     draw_region_boxes,
     draw_vector_land_overlay,
     frame_stem,
@@ -212,6 +213,7 @@ def draw_report_safe_current_map(
     draw_region_boxes(ax, region_bboxes, fill=False, zorder=8)
     ax.set_xlim(lon_min, lon_max)
     ax.set_ylim(lat_min, lat_max)
+    coordinate_ticks = apply_boundary_coordinate_ticks(ax, extent)
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     ax.set_aspect("equal", adjustable="box")
@@ -223,6 +225,7 @@ def draw_report_safe_current_map(
     return {
         "path": str(output_path),
         "extent_lonlat": [float(lon_min), float(lon_max), float(lat_min), float(lat_max)],
+        "coordinate_ticks": coordinate_ticks,
         "target_arrows": int(target_arrows),
         "quiver_step_yx": [int(sy), int(sx)],
         "valid_vector_cells_after_report_mask": int(np.count_nonzero(valid_vector)),
