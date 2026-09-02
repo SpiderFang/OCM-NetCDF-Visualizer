@@ -450,6 +450,419 @@ fps 1：約 248 秒
 
 年度研究區域分割建議在月資料中間檔上計算特徵，例如月平均流速、主流向、季節變化、渦度、散度、垂直剪切與粒子停留時間。這些特徵比單純影片更適合後續分群與區域邊界判讀。
 
+### Server 完整台灣周邊 1 km 表層流場產品
+
+本專案另提供一條針對簡報展示與年度備查的完整台灣周邊流程。它直接讀取 Server
+`/CWA-OCM/2024` 與 `/CWA-OCM/2025` 內的原始日 NetCDF，使用與 1 km 報告圖相同的
+經度 `[119, 123]`、緯度 `[20, 27]` 範圍，將原始 SCHISM/UGRID 非結構網格插值到約
+1 km 的規則經緯度格點，固定使用模型表層 `layer 047`，再以每 6 小時一幀產生年度
+動畫。所有中間檔與動畫均寫入下列新建、隔離的資料夾；既有
+`/data/OCM-Preprocessed-Data/preprocessed` 不會被覆寫或修改：
+
+```text
+/data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/
+```
+
+#### 時間軸修復與缺日處理
+
+原始檔案的 `time` units 在部分月份存在日期偏移，因此年度產品不把 NetCDF 的
+`time` units 當作最終日期來源，而是以檔名 `YYYYMMDD_schout.nc` 的日期為權威，
+將每日四個輸出時間固定定義為 `01:00、07:00、13:00、19:00 UTC`。這個規則保留原始
+檔案內的 1、7、13、19、25 小時相對位置，同時消除跨檔案的日期偏移。
+
+2025 年原始資料缺少以下 10 個日期：
+`2025-03-03`、`2025-03-14`、`2025-03-19`、`2025-05-23`、`2025-07-21`、
+`2025-11-02`、`2025-11-05`、`2025-11-19`、`2025-11-20`、`2025-11-27`。
+產品仍建立完整的規則時間軸；缺日的 40 個 6 小時時間步以相鄰有效時間步逐格線性
+補值，並在 `source_valid.npy`、`imputed.npy` 與 `time_status.npy` 中留下可追溯標記。
+這些補值是為了維持年度動畫時間連續，不應被解讀為提供者重新補回的觀測或模式輸出。
+
+#### Server 執行方式
+
+所有長時間工作均應在 Server `tmux` 中執行，以避免 SSH 斷線中止前處理或渲染：
+
+```bash
+tmux new -s ocm_surface_2024_2025
+```
+
+前處理指令如下；`--output-dir` 必須指向新的空資料夾，程式會拒絕把結果寫入非空
+資料夾，以降低誤覆寫風險：
+
+```bash
+python3 /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/scripts/preprocess_ocm_surface_year.py \
+  --source-root /CWA-OCM \
+  --output-dir /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/intermediate_v2 \
+  --years 2024 2025 \
+  --bbox 119 123 20 27 \
+  --target-resolution-km 1 \
+  --layer-index 47 \
+  --time-step-hours 6 \
+  --first-hour-utc 1 \
+  --land-geojson /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/config/taiwan_exact_coastline.geojson \
+  > /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/logs/formal_preprocess_v2.log 2>&1
+```
+
+輸出的 `u_surface.npy`、`v_surface.npy` 與 `speed_surface.npy` 形狀為
+`time, latitude, longitude = 2924, 780, 409`，其中 `speed_surface.npy` 的單位是
+`m/s`，定義為 `sqrt(u_surface**2 + v_surface**2)`。`eta/elev` 沒有參與本產品的
+底圖；`eta` 是自由水面高度，若未來要製作水位動畫，必須另外設計單位為公尺的色階，
+不可與流速的 `m/s` 色階混用。
+
+前處理完成後，使用下列指令產生三個用途不同的 GIF。預設不顯示標題、區域名稱、
+日期、時間或狀態文字；版面只保留 1 km 報告圖使用的經緯度軸、刻度與四個研究區域
+透明內部的框線。陸地使用中度灰米色，僅用於辨識 mask=False 的位置；中性趨勢版
+保留深藍框線，固定流速備查版使用低飽和磚紅框線。固定流速備查版額外保留固定刻度的
+數值 colorbar，並標示
+`流速(公尺/秒)`，以便核對不同時間的色彩是否使用相同的 `m/s` 尺度：
+
+```bash
+MPLCONFIGDIR=/tmp/ocm-surface-mplconfig PYTHONUNBUFFERED=1 \
+python3 /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/scripts/visualize_ocm_surface_year.py \
+  --input-dir /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/intermediate_v2 \
+  --output-dir /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_v8 \
+  --fps 4 \
+  --trend-frame-stride 8 \
+  --target-arrows 2600 \
+  --quiver-scale-multiplier 16 \
+  --dpi 110 \
+  > /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/logs/formal_render_v8.log 2>&1
+```
+
+輸出檔案與時間長度如下：
+
+- `global_trend_surface_layer_047_four_regions.gif`：每 48 小時取一幀，約 366 幀；
+  `fps=4` 時約 92 秒，作為簡報主動畫，用於呈現兩年大趨勢與四區域流向變化；
+  每幀目標約 2600 支箭頭、抽樣步距約 11 格，較前版約 1800 支箭頭更容易辨識
+  大範圍流場的連續性；箭頭縮放倍數降為 16，使箭頭適度加長。
+- `surface_layer_047_speed_fixed_scale_four_regions.gif`：與主動畫相同時間抽樣，
+  背景使用全資料共用的固定流速色階；色彩代表 `m/s`，不是 `eta`，箭頭改為白色
+  以提高在 viridis 色階上的可見度，並以整部 GIF 共用的固定 256 色盤避免色條跳動。
+- `annual_full_surface_layer_047_6h.gif`：保留完整 6 小時時間軸的年度備查動畫，
+  共約 2924 幀；`fps=4` 時約 12.2 分鐘，不建議直接放入簡報播放。
+- `surface_layer_047_speed_fixed_scale_first_frame.png`：固定色階版第一幀，供報告、
+  色階與岸線品質查核。
+- `global_trend_surface_layer_047_four_regions.mp4`、
+  `surface_layer_047_speed_fixed_scale_four_regions.mp4` 與
+  `annual_full_surface_layer_047_6h.mp4`：由同一 v8 GIF 轉製的 H.264 MP4，維持
+  原本的影格順序、4 fps、解析度與無標題版面；影片不含音訊，可直接插入簡報。
+- `animation_manifest.json`：記錄輸入版本、時間抽樣、固定色階上限、箭頭參數、
+  影格數與輸出檔名。
+
+固定流速備查版的色階不是 data-derived：產品規格固定為 `0.0–2.0 m/s`，刻度固定為
+`0.0、0.5、1.0、1.5、2.0`，每個刻度顯示一位小數，色條標籤為
+`流速(公尺/秒)`；固定色階版箭頭為白色，中性趨勢版箭頭採用深藍系中深藍青色
+`#1f5f83`，以和深灰海岸線區分。
+為避免垂直色條壓縮等比例主圖，固定流速版使用獨立 colorbar 軸與較寬的
+`7.2×11.0` 英吋畫布（中性版為 `6.6×11.0` 英吋）；主圖資料框高度與經緯度比例
+維持一致，右側另保留單位標籤的安全留白。這個尺寸差異只屬版面配置，不代表資料
+解析度或地理範圍不同。三個版本的上側版面邊界由 `top=0.935` 調整為 `top=0.9675`，
+使上方空白約縮減一半；固定版的 colorbar 同步使用相同上界，避免色條與主圖上下錯位。
+三個版本的 X/Y 軸標籤統一使用中文「經度」與「緯度」，數值刻度仍保留實際地理座標。
+GIF 編碼採單一 global palette 且不使用抖動量化，因此所有動畫幀的顏色均可直接比較；
+超過 `2.0 m/s` 的罕見強流
+會以色階最深端呈現。前處理 metadata 另記錄 P98/P99 與抽樣最大值，但那些數值只
+用於箭頭長度與資料品質查核，不會改變背景色階上下限。
+
+正式動畫成果已同步回本機主專案的下列路徑，便於簡報與報告直接取用；此資料夾由
+`.gitignore` 排除，不會把大型 GIF/MP4 自動納入版本控制：
+
+```text
+outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations/
+```
+
+本次新版（固定版主圖與色條重新配置、三版本上方空白縮減、XY 軸改為中文經緯度、中性版箭頭改為 `#1f5f83`、中度灰米色陸地、區域框取消填色、固定流速版採低飽和磚紅框線）先在 Server
+的
+`/data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_v8/`
+獨立完成並驗證，再同步至上述本機路徑；Server 原有 `animations/`、`animations_v2/`、
+`animations_v3/`、`animations_v4/`、`animations_v5/`、`animations_v6/` 與 `animations_v7/` 均保留作為歷次成果備查，沒有刪除或覆寫。
+
+## 四海域 modal-context display-only coastline v2
+
+本版正式動畫以既有簡報相同的六層聯合水柱 SVD 結果，補充四個海域的表層流場與
+模態重建關聯。`svd_source_unchanged: true`，且 `coastline_correction_scope:
+visualization_only`：正式 SVD 的模態、時間係數、流場變異百分比與達累積 90% 所需
+模態數均不重算、不改寫。exact coastline 只在渲染階段阻止陸地上的流速色塊與箭頭被
+展示，並以向量 polygon 覆蓋底圖；因此本版不宣稱重新定義 SVD、殘差或 RMSE。
+
+正式 SVD 根目錄為：
+
+```text
+/home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-13_water_column_four_regions/water_column_svd/
+```
+
+四區正式結果是該目錄下的既有 A–D run。原始表層流場使用其 metadata 追溯出的同源
+cache `/data/OCM-Preprocessed-Data/preprocessed/ocm_surface`；完整 1 km 產品只用於
+時間交集與展示網格查核。重建仍為 `mean + Σ(mode_u/v_mps_per_raw_pc × pc.npy)`，
+`pc_standardized.npy` 只在內部用於模態 1 相位案例選取，不能與 raw-PC 模態係數混用。
+
+精確岸線檔案為：
+
+```text
+/Users/mustlab/Workspace/OCM-NetCDF-Visualizer/data/coastline/taiwan_exact_coastline.geojson
+/data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/config/taiwan_exact_coastline.geojson
+```
+
+兩者 SHA-256 均為
+`9e2e0ac9bc527aca87d89332cd428fdcb776eefbf94a85dd70f887f729b95fdd`；資料為
+FeatureCollection，1,905 個原始 features、1,912 個可 rasterize polygon groups。
+岸線 rasterize 採保守 cell-overlap 語意：cell center、四角或 ring vertex 接觸
+polygon 即標示 `coastline_land_mask`，洞環扣除。真實陸地、分析域外與逐時缺值在
+渲染與 QA 中保持不同語意。
+
+早期建立的 `2026-08-27_coastline_corrected_v2` SVD 與 C pilot comparison 只作
+diagnostic／方法敏感度檢查，保留於版本化目錄，絕不納入正式動畫 manifest，也不作為
+正式動畫來源。正式輸出目錄另行保留，且不覆寫 `animations_svd_modal_context_v1`。
+
+正式渲染命令如下；SERVER 的長時間工作必須在 `tmux` 內執行：
+
+```bash
+MPLCONFIGDIR=work/matplotlib-cache PYTHONDONTWRITEBYTECODE=1 \
+python3 scripts/visualize_ocm_svd_modal_context.py \
+  --svd-base /home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-13_water_column_four_regions/water_column_svd \
+  --surface-cache-base /data/OCM-Preprocessed-Data/preprocessed/ocm_surface \
+  --full-product-dir /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/intermediate_v2 \
+  --coastline-geojson /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/config/taiwan_exact_coastline.geojson \
+  --output-dir /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2 \
+  --regions A,B,C,D --fps 4 --width 864 --height 1080 --target-arrows 420
+```
+
+正式影片各取兩段不重疊的 7 日、6 小時代表視窗，每段 28 個資料影格，片頭與片尾各
+停留約 1 秒，總計 64 幀、4 fps、約 16 秒。上下兩面板分別為原始表層流場與前 n 個
+模態重建流場；四區共用固定 0–2.2 m/s 色階與真正代表 1 m/s 的箭頭圖例。畫面只使用
+簡報名詞：標題為 `海域 A（東北角）`、`海域 B（新竹外海）`、`海域 C（後灣海域）`、
+`海域 D（連江海域）`；相位列為「模態 1 時間係數：正／負相位案例」；面板 caption、
+單一完整的 `流速（公尺／秒）` 直式色條標籤與中文 `經度`／`緯度` 均置於不遮蔽資料圖框的位置。
+觀眾可見畫面不使用 `PC`、`K`、`K90`、`解釋變異` 或非簡報同義詞；manifest 與 README
+可保留 `pc.npy`、`pc_standardized.npy`、K90 等內部資料／演算法名稱供追溯。
+
+正式輸出位於：
+
+```text
+SERVER  /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/
+LOCAL   /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/
+```
+
+其中包含四支 MP4、poster、正／負相位 QA 幀、首／中／末 contact sheet、exact coastline
+疊圖、A–D 陸地稽核摘要、`animation_manifest.json` 與本輸出目錄的 README。manifest
+記錄正式 SVD 路徑、精確共同時間、mask 語意、岸線雜湊、色階、箭頭尺度、文字規格、
+ffprobe 資訊與輸出雜湊；正式版不需要也不產生 v1/v2 SVD comparison。
+
+QA 必須同時通過 ffprobe 技術檢查、exact coastline 地理檢查與畫面文字檢查：H.264/
+`yuv420p`、864×1080、4 fps、無音訊、首中末幀、land finite render=0、land-arrow=0、
+分析域外不被標作陸地、兩岸線雜湊一致，以及四區標題／caption／相位／色條／箭頭圖例
+完全符合規格。最終 `qa.all_passed=true` 已在本機以抽取影格及 contact sheet 驗證；
+仍建議在簡報端以右側約 35% 尺寸人工確認可讀性。PPTX 未修改，播放方式仍由簡報端
+設定為點擊播放、不循環。
+
+### 四海域時間內插對照版
+
+另產製 `formal_abcd_slide_aligned_v4_temporal_interpolated` 與 v3 並列比較。此版仍唯讀
+使用同一正式六層聯合水柱 SVD、同一岸線與同一組代表時段；只在 renderer 的展示 payload
+階段，以相鄰 12 小時真實錨點的 `alpha=0.5` 線性內插形成 6 小時中間畫面。每段仍輸出
+28 幀、四區仍為 64 幀／4 fps／約 16 秒，因此不增加影片時間，也不提高原始資料時間解析度。
+輸出目錄為：
+
+```text
+outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_slide_aligned_v4_temporal_interpolated/
+```
+
+`temporal_interpolation_v3_comparison.json` 記錄同一選窗、座標與正式 SVD 的對照，
+`temporal_interpolation_frame_transition_qa.json` 記錄解碼影格的相鄰 RGB 轉換差異。此
+內插版適合簡報視覺展示；若要逐筆保留每個 6 小時觀測影格，應使用未啟用內插的 v3。
+
+### 四海域純原始表層流場動畫—緊湊 2×2 版
+
+依簡報展示版面另製作只含「原始流場」單一主圖的 A–D 四區動畫，供四支影片在
+簡報中以 2×2 配置排列。此版本不顯示模態重建、相位、UTC 或內部 SVD 文字，
+不修改 PPTX，也不覆寫既有 v3／v4 雙面板成果；本次依使用者要求直接覆寫同一目錄
+中的舊 `0.0–2.2 m/s` 純原始版，未另保留舊色階副本。renderer 為
+`scripts/render_ocm_raw_surface_only.py`，正式輸出目錄如下：
+
+```text
+SERVER /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_compact_v1_temporal_interpolated/
+LOCAL  /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_compact_v1_temporal_interpolated/
+```
+
+四區均採 864×500 px、4 fps、64 幀、16 秒、H.264／`yuv420p`、無音訊。畫面主標題
+分別為 `海域 A（東北角） 原始流場`、`海域 B（新竹外海） 原始流場`、
+`海域 C（後灣海域） 原始流場` 與 `海域 D（連江海域） 原始流場`；固定流速色階為
+`0.0–0.8 m/s`，刻度每 `0.2 m/s`（`0.0, 0.2, 0.4, 0.6, 0.8`），色條標籤為直式
+`流速（公尺／秒）`。主圖內的 `1 公尺／秒` 是由同一 raw-surface QuiverKey、
+`U=1.0` 產生，非手工繪製的裝飾符號。
+
+`0.0–0.8 m/s` 是為與簡報靜態圖一致而設定的展示色階；超過 0.8 m/s 的原始
+速度會在色階頂端飽和，原始資料、箭頭方向與箭頭尺度不被截斷或修改。renderer
+可透過 `--fixed-speed-vmax` 與 `--speed-tick-step` 明確記錄此展示契約。
+
+為使四支影片縮放後放入簡報 2×2 版面時外觀一致，主圖採共用的固定 axes rectangle
+`[0.10, 0.14, 0.75, 0.74]`，色條與主圖共用 y/height；不再讓 Matplotlib 依 A–D
+不同的經緯度範圍比例自動縮短 C/D 的圖框。這是 presentation-only 的畫面配置，
+不改變各區 xlim/ylim、原始 u/v 或正式 SVD；代價是各區地理縱橫顯示比例可能有有限
+差異，因此不應以此版面作距離或角度量測。manifest 的 `qa.layout_consistency` 會
+以最終像素 bbox 驗證四區主圖與色條一致，且額外檢查經度軸名稱未裁切。
+
+資料仍唯讀使用既有正式六層聯合水柱 SVD 所追溯的同源表層 cache；SVD 模態與時間
+係數不被改寫，`coastline_correction_scope=visualization_only`。精確 GeoJSON 岸線
+只在渲染階段遮蔽真實陸地內的流速色塊與箭頭，再以無描邊高解析度 polygon 覆蓋；
+保守 1 km raster land mask 僅供資料／地理稽核，不作可見階梯海岸線。啟用
+`--temporal-interpolation` 時，以相鄰 12 小時真實錨點線性產生展示用 6 小時中間場，
+維持 64 幀與 16 秒，不增加原始資料時間解析度。
+
+SERVER 長時間渲染需在 `tmux` 內執行，例如：
+
+```bash
+tmux new -s ocm_raw_only_compact_v1
+PYTHONPATH=/tmp/ocm_raw_surface_only_v1 \
+/home/mustlab/Workspace/OCM-SVD-Analysis/.venv/bin/python \
+/tmp/ocm_raw_surface_only_v1/render_ocm_raw_surface_only.py \
+  --svd-base /home/mustlab/Workspace/OCM-SVD-Analysis/work/server_results/2026-08-13_water_column_four_regions/water_column_svd \
+  --surface-cache-base /data/OCM-Preprocessed-Data/preprocessed/ocm_surface \
+  --coastline-geojson /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/config/taiwan_exact_coastline.geojson \
+  --output-dir /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_compact_v1_temporal_interpolated \
+  --regions A,B,C,D --fps 4 --width 864 --height 500 --target-arrows 420 \
+  --quiver-scale-multiplier 20 --fixed-speed-vmax 0.8 --speed-tick-step 0.2 \
+  --temporal-interpolation --overwrite
+```
+
+每區另保留 poster、正／負時間窗代表幀、首／中／末 contact sheet、
+`animation_manifest.json` 與 `qa/local_validation.json`。本機驗證程式
+`scripts/validate_ocm_raw_surface_only.py` 以可用的 `ffprobe` 重新檢查影片編碼、
+尺寸、影格數、時長、無音訊、PNG 尺寸、精確岸線 SHA-256、固定版面 metadata 與
+輸出雜湊；本機同步成果的 `qa.all_passed=true`。SERVER 端未安裝 `ffprobe`，其原始
+遠端 QA 快照會保留 `ffprobe_not_found`，不代表同步後影片本身編碼失敗。
+
+### 四海域純原始表層流場動畫—連續 30 日／30 秒平滑版
+
+為觀察較長時間範圍且避免每 6 小時直接切換造成跳動，另以
+`scripts/render_ocm_raw_surface_only_continuous.py` 產生四區同一段連續長時窗版本。
+本版固定使用 120 個實際觀測時間位置（每 6 小時一筆，時槽覆蓋 30 日），輸出
+120 幀、4 fps、精確 30 秒；不增加片頭／片尾、不加入虛擬影格，也不是七日內插。
+四區共用的實際 UTC 時窗、source-valid／非 imputed 驗證結果寫在輸出 manifest。
+
+為降低相鄰觀測在影片中的瞬間變化，僅對中間 118 個展示位置套用
+`0.25×前一筆 + 0.50×當筆 + 0.25×下一筆` 的三點時間平滑，首尾影格保留原始值。
+平滑只存在於 renderer 的展示 payload，不寫回原始 OCM cache，不改動正式 SVD，
+也不代表新增觀測資料；若需逐筆觀看原始觀測，可在同一 renderer 關閉
+`--temporal-smoothing`。
+
+本版四區使用同一個固定 quiver scale 作為比例尺與流場箭頭的展示示意，不依 A–D
+各自流速分布調整；各區 p95 僅保留作為診斷資訊。比例尺文字與箭頭同步縮小，
+以避免 D 區因局地流速較低而出現特別長的比例尺箭頭。
+
+本版輸出目錄為：
+
+```text
+SERVER /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_continuous_30d_30s_temporal_smoothed_v1/
+LOCAL  /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_continuous_30d_30s_temporal_smoothed_v1/
+```
+
+畫面仍採四區一致的 864×500 px、固定 0.0–0.8 m/s 色階與 0.2 m/s 刻度，並保留
+精確 vector coastline、無音訊 H.264／`yuv420p`、poster、起中末 QA 幀、contact
+sheet、manifest 與輸出 README。SERVER 端若沒有 `ffprobe`，需將成果同步回本機後
+使用 `scripts/validate_ocm_raw_surface_only.py` 重新完成編碼與檔案 QA。
+
+### 四海域純原始表層流場動畫—30 秒無內嵌主標題版
+
+為便於在 PPTX 內後製海域名稱，另以同一個 30 秒、120 個實際 6 小時觀測時段與
+三點展示平滑設定產生無內嵌主標題版本。此變體只移除 figure-level 主標題，保留
+主圖、色條、座標軸、比例尺、岸線、時間窗與四區共用 quiver scale；上方安全區仍
+保留約 30 px，供簡報端放置可編輯文字；主圖／色條上緣已向上延伸以回收多餘白底。
+含標題版本不會被覆寫。
+
+```text
+SERVER /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_continuous_30d_30s_temporal_smoothed_no_title_v1/
+LOCAL  /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_continuous_30d_30s_temporal_smoothed_no_title_v1/
+```
+
+renderer 以 `--no-show-title` 控制此變體，manifest 會記錄
+`title_visible=false` 與 `title_removed_for_editable_ppt_overlay=true`。本版仍採
+864×500 px、4 fps、120 幀、精確 30 秒、H.264／`yuv420p`、無音訊；固定流速色階
+仍為 0.0–0.8 m/s、每 0.2 m/s 一格。無標題版與含標題版可直接逐幀對照，差異僅限
+主標題是否寫入畫面像素。
+
+### 四海域純原始表層流場動畫—60 秒雙版本
+
+依同一版面標準再製作 60 秒版本：每支影片使用 240 個實際 6 小時觀測時段，
+4 fps、精確 60 秒；中間展示位置仍採三點時間平滑，未增加虛擬影格或修改原始資料。
+含標題版與無標題版各自存放於獨立目錄，兩者使用相同時間窗、色階、岸線、主圖框及
+固定跨區 quiver scale。無標題版保留約 30 px 上方安全區，供 PPTX 放置可編輯標題。
+
+```text
+SERVER /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_continuous_60d_60s_temporal_smoothed_v1/
+LOCAL  /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_continuous_60d_60s_temporal_smoothed_v1/
+SERVER /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_continuous_60d_60s_temporal_smoothed_no_title_v1/
+LOCAL  /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_continuous_60d_60s_temporal_smoothed_no_title_v1/
+```
+
+兩組 manifest 均記錄 `source_frame_count=240`、`expected_duration_seconds=60.0`；含
+標題版記錄 `title_visible=true`，無標題版記錄 `title_visible=false`。
+
+### 四海域純原始表層流場動畫—2024–2025 全部共同實測時段無標題版
+
+依使用者要求，另以同一套無標題 raw-only 版面完整播放 2024–2025 兩年資料。全臺
+6 小時產品共有 2,924 個理論時間格；其中 40 格為 imputed，且與四區正式 SVD、同源
+surface cache 精確交集後，四區共同可追溯的 source-valid、非 imputed 實測位置為
+2,848 格。影片保留這些實測時間位置與原始時間缺口，不以補值影格填洞；4 fps 下每區
+輸出 2,848 幀、精確 712 秒（約 11 分 52 秒）。
+
+為降低每 6 小時直接切換的跳動感，中間位置採相鄰實測場的三點展示平滑；缺口前後的
+邊界影格不跨缺口平滑。平滑僅存在 renderer 記憶體與 MP4，不回寫 OCM cache、不改寫
+正式 SVD，也不代表新增觀測。完整資料版的缺口、排除數量、起訖 UTC、輸出雜湊與
+QA 均記錄於該目錄 `animation_manifest.json`。
+
+```text
+SERVER /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_full_2024_2025_temporal_smoothed_no_title_v1/
+LOCAL  /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_full_2024_2025_temporal_smoothed_no_title_v1/
+```
+
+檔案名稱使用 `region_<A-D>_<name>_raw_surface_only_full_2024_2025_712s_temporal_smoothed_no_title.mp4`，
+以免與 30／60 秒長時窗版本混淆。版面、固定 0.0–0.8 m/s 色階、0.2 m/s 刻度、共用
+quiver scale、exact coastline 展示遮罩及無標題上方安全區均沿用 60 秒無標題版。
+
+### 四海域純原始表層流場動畫—2024–2025 全期間 3 分鐘重採樣無標題版
+
+為在簡報中保留兩年起訖趨勢、同時避免約 12 分鐘完整版播放時間過長，使用
+`scripts/render_ocm_raw_surface_only_continuous.py` 將四區共同的 2,848 個實測
+source-valid／非 imputed 觀測作為時間錨點，均勻重採樣為 720 個展示影格。輸出為
+4 fps、精確 180 秒；正常相鄰 6 小時觀測間以 u/v 線性時間內插，已知資料缺口不
+跨越內插而採最近有效觀測保持。這不是新增觀測、不是七日內插，也不改寫原始
+surface cache 或正式 SVD。
+
+```text
+SERVER /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_full_2024_2025_3min_temporal_resampled_no_title_v1/
+LOCAL  /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_full_2024_2025_3min_temporal_resampled_no_title_v1/
+```
+
+本版保留無內嵌主標題的 30 px 上方安全區，固定 0.0–0.8 m/s 色階、0.2 m/s 刻度、
+四區共用 quiver scale、exact coastline 向量陸地與 864×500 px 版面。每區 MP4
+均為 H.264／`yuv420p`、720 幀、無音訊；輸出 README、manifest、poster、起／中／
+末影格與 contact sheet 同時記錄 source/display frame count、實際日曆時間步階、
+內插／缺口保持數量、固定比例尺與 QA。同步回本機後，`qa/local_validation.json`
+已以本機 ffprobe 完成編碼與檔案稽核。
+
+### 四海域純原始表層流場動畫—三日每小時實測版
+
+本版先以靜態圖供影片渲染前審核四區共同版面與動態 UTC 標示，後續已完成四區影片。
+時窗由 2024–2025 的既有
+6 小時產品以四區流場變化指標自動挑選，但實際畫面資料重新讀取原始 SCHISM
+NetCDF 的 24 小時日檔；每小時一幀，共 72 個原始觀測時段，完全不使用時間內插、
+三點平滑、淡化或預測值。中間時刻預覽為 `2024-11-01 13:00 UTC`。
+
+```text
+SERVER hourly product  /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/intermediate_hourly_three_day_actual_v1/
+SERVER selection       /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/hourly_window_selection_v1/selection_three_day_hourly.json
+SERVER preview         /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_3day_hourly_actual_2fps_v1/preview/
+SERVER formal output   /data/OCM-Preprocessed-Data/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_3day_hourly_actual_2fps_v1/
+LOCAL preview          /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_3day_hourly_actual_2fps_v1/preview/
+LOCAL formal output    /Users/mustlab/Workspace/OCM-NetCDF-Visualizer/outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/formal_abcd_raw_surface_only_3day_hourly_actual_2fps_v1/
+```
+
+預覽畫布為四區 2×2 審核圖及 C 區放大圖；正式影片使用相同 renderer、
+864×500 px、2 fps，72 幀對應精確 36 秒。畫面上方只置中顯示隨幀更新的 UTC
+日期時間，海域名稱與「原始流場」標籤留給簡報端另行製作；色階固定 0.0–0.8 m/s、每 0.2 m/s 一格，四區共用比例尺與
+exact coastline 展示遮罩。這裡的潮汐變化仍是原始表層流場的觀測序列，不等同於
+已完成潮汐調和分離。
+
 ## Smoke Test 是什麼
 
 Smoke test 是軟體開發裡的「冒煙測試」：用最小資料量快速確認整條流程是否能跑通。此專案的 smoke test 通常只取 1 個日檔、較疏時間抽樣或較粗解析度，用來檢查 NetCDF 讀取、缺值處理、水平插值、輸出 `.npy` 與繪圖是否會失敗。
@@ -472,6 +885,19 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 - `scripts/preprocess_ocm_month.py`：月資料前處理主程式。它會直接讀取單月所有 `*_schout.nc` 日檔，選取台灣鄰近 bbox，優先使用原始 `SCHISM_hgrid_face_nodes` 元素連結把非結構網格節點資料插值到規則經緯度格點；若來源檔缺少 face connectivity，才退回 Delaunay 重心權重。選用 `--include-elev` 時會輸出 `elev.npy`，選用 `--land-geojson` 時會在靜態 mesh mask 之外再扣除 GeoJSON 陸域 polygon，輸出包含 `u/v/speed/elev/zcor_mean/bathymetry/mask` 等中間檔；目前不接受 inspect JSON 作為輸入。
 - `scripts/visualize_ocm_month.py`：月資料視覺化主程式。它讀取前處理輸出的 `.npy` 與 JSON metadata，產生可選中性底圖或 η/elev 水位底圖的表層流場 GIF、指定垂向層 GIF，以及含海底面參照的 3D 稀疏箭頭示意圖。
 - `scripts/plot_ocm_clean_region_maps.py`：投影片後製用乾淨區域圖腳本。它讀取既有月資料 `.npy`，輸出只含經緯度刻度與 `Longitude`/`Latitude` 的 PNG：四個等物理尺寸 flow-domain bbox 主圖，以及龜山島、貢寮、南北竿三張獨立放大圖。此腳本不取代一般動畫流程，也不修改 `visualize_ocm_month.py` 的標題、圖例或比例尺設計。
+- `scripts/preprocess_ocm_surface_year.py`：Server 完整年度表層前處理程式。它以原始檔名日期修復部分 NetCDF `time` units 的偏移，建立固定 6 小時時間軸，讀取單一表層 `layer 047`，以 UGRID face connectivity 優先插值到完整台灣周邊約 1 km 規則格點，套用逐時 wet/dry 與指定 GeoJSON 岸線遮罩，並對缺日時間步作可追溯的相鄰時間線性補值。輸出與既有月資料格式隔離，不能直接覆寫非空資料夾。
+- `scripts/visualize_ocm_surface_year.py`：完整年度表層 GIF 渲染程式。它讀取年度前處理 `.npy`，以 1 km 報告圖相同的四個研究區域 bbox、較稀疏且縮短的箭頭與固定圖面產生簡報趨勢版、固定流速色階備查版及完整 6 小時年度版。預設輸出不含標題、區域名稱、時間、狀態或其它說明文字；`--show-region-labels` 僅供人工診斷，不應用於正式簡報檔。
+- `scripts/visualize_ocm_svd_modal_context.py`：四海域六層聯合 SVD 模態—表層分量關聯動畫 renderer。它只讀取既有正式 SVD 與 metadata 追溯出的同源 `preprocessed/ocm_surface` cache，再以精確 UTC epoch-ns 交集選取 source-valid、非 imputed 的 6 小時資料；上半部繪製原始表層流場，下半部依 `mean + Σ(mode_per_raw_pc × pc)` 產生前 n 個模態重建流場，並以 exact coastline 只做展示遮罩。輸出 864×1080、4 fps、H.264/yuv420p MP4、poster、相位 QA 幀與 manifest。程式與文件保留「六層聯合 SVD 模態之表層分量」的科學語意，不可解讀成 surface-only SVD；畫面名詞遵循簡報原文，內部仍可追溯 `pc.npy`、`pc_standardized.npy` 與 K90。
+- `scripts/render_ocm_raw_surface_only_continuous.py`：四海域純原始表層流場長時窗 renderer。它只讀取正式 SVD 所追溯的同源 surface u/v cache；可逐一播放全部共同 6 小時實測時段，或以 `--display-frame-count` 將完整日曆時間範圍重採樣為固定展示影格。重採樣模式在正常相鄰觀測間對 u/v 做 display-only 線性時間內插，資料缺口不跨越內插；輸出 864×500、固定 0.0–0.8 m/s 色階、共用 quiver scale、H.264/yuv420p MP4、poster、contact sheet、manifest 與 QA。它不產生 SVD 重建、不改寫原始 cache，也不把展示內插值視為新增觀測。
+- `scripts/select_ocm_raw_hourly_window.py`：從既有 2024–2025 全臺 6 小時產品挑選四區共同三日代表時窗。它只計算候選評分與日檔存在性，不建立 hourly 資料、不修改來源；實際影格由原始 NetCDF 前處理重新產生。
+- `scripts/render_ocm_raw_surface_hourly.py`：四區三日每小時原始表層流場 renderer。它驗證 72 個連續 hourly source-observed 時段，使用 exact coastline vector 只做展示階段陸地覆蓋，輸出動態 UTC 靜態預覽或 2 fps H.264 影片；不包含 SVD 重建，也不做時間內插或平滑。
+- `scripts/coastline_utils.py`：v2 共用精確岸線工具。它驗證 GeoJSON SHA-256、統計 feature/polygon 數，並以 cell center、四角或 ring vertex 接觸 polygon 的保守 1 km cell-overlap 規則建立 `(lat, lon)` `coastline_land_mask`；洞環會扣除，輸入網格與速度值不被修改，向量外環則供最高 z-order 陸地覆蓋使用。
+- `scripts/audit_ocm_svd_coastline.py`：A–D exact-land 科學稽核工具。它把真實陸地、分析幾何域外、模型靜態域外、surface feature 未納入與逐時 invalid 分開統計，並跨 2024–2025 全部同源 surface cache 計算 exact-land 有限 u/v、valid pair 與速度統計；已完成的污染診斷只作方法敏感度記錄，不會改寫正式 SVD 或正式動畫來源。
+- `scripts/build_coastline_corrected_surface_inputs.py`：建立不覆寫原始 cache 的 corrected surface SVD 診斷輸入。它只複製 grid、將 `mask_static.npy` 改為 `original & ~coastline_land_mask`，兩年 monthly arrays 以唯讀 symlink 保留原始來源；此輸入僅供污染／方法敏感度檢查，不是正式動畫輸入。
+- `scripts/create_coastline_corrected_svd_configs.py`：把既有 water-column v1 config 複製到版本化診斷目錄，新增 coastline correction metadata 與 exact GeoJSON 雜湊；不改寫 v1 config，也不啟動正式重算。
+- `scripts/compare_ocm_svd_coastline_versions.py`：以同一精確 source-valid/non-imputed 6 小時交集比較診斷版與既有版 K90、前四模態流場變異百分比、raw-PC 重建與 PC1 正/負相位視窗；結果只供方法敏感度追溯，不納入正式動畫 manifest。
+- `scripts/make_coastline_svd_qa_overlays.py`：輸出各區 exact coastline mask＋1 km 網格＋正/負相位 raw/K90 代表影格疊圖，並自動統計 exact-land finite render 與箭頭數。
+- `scripts/validate_ocm_svd_modal_context.py`：四海域 modal-context MP4 QA 工具。它不修改來源資料，使用 `ffprobe` 確認單一 H.264 video stream、無音訊、`yuv420p`、尺寸、fps、時長與 poster，再以 `imageio` 抽取首／中／末幀建立 contact sheet；v2 另驗證 coastline SHA-256、polygon count、land-mask cell count、exact-land finite render=0、land-arrow=0 與分析域外未被標作陸地。人工仍需確認投影片縮放後的可讀性。
 - `scripts/concat_ocm_year_gifs.py`：年度 GIF 串接工具。它讀取已完成的每月 GIF，依月份順序輸出年度 GIF 與 manifest JSON；此工具不重畫影格，也不改變每月原本的色階或水位異常基準。
 - `scripts/run_ocm_2025_year.sh`：月份批次入口，實際 server 執行方式與環境變數範例請見 `README_SERVER.md`。
 - `scripts/summarize_ocm_year.py`：月份/年度摘要檢查工具。它讀取每個月的 `monthly_summary.json` 與 `.npy` header，輸出 JSON/CSV 摘要，檢查缺檔、shape、月份格點一致性與日檔缺日。
@@ -483,6 +909,8 @@ Smoke test 的目的不是產生研究用結論，而是及早發現環境、路
 - `outputs/ocm_2025_01_smoke/`：小型 smoke test 輸出。通常只處理少量日檔、較疏時間步或較粗解析度，用於快速確認讀檔、插值與繪圖流程是否能跑通。
 - `outputs/ocm_2025_01_daily/`：一月份每日抽樣的主要 demo 輸出。此資料夾可作為後續其它月份處理的月資料格式範本。
 - `outputs/ocm_2025_01_taiwan_10km_3h/`：台灣鄰近海域經度 `[119, 123]`、緯度 `[20, 27]` 的 10 km / 3 小時抽樣月資料輸出。這是目前較細解析度與較密時間抽樣的主要 demo 設定。
+- `outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_v1/`：歷史 v1 四海域簡報嵌入用動畫成果，保留作為比較與備查，不覆寫、不以新版文字規格取代。
+- `outputs/ocm_2024_2025_taiwan_1km_surface_6h_v1/animations_svd_modal_context_coastline_corrected_v2/`：正式 v2 display-only coastline 成果目錄。它沿用 2026-08-13 既有正式 SVD，只在繪圖階段套用 exact coastline 遮罩；包含四支 864×1080、4 fps、H.264/yuv420p MP4、poster、正／負相位幀、首／中／末 contact sheet、exact coastline 疊圖、land audit、manifest 與輸出專用 README。早期 corrected-SVD C pilot／comparison 若存在，均與正式 manifest 隔離。
 
 ### 月資料輸出檔案
 
